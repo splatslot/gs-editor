@@ -71,9 +71,34 @@ export class Editor {
     this.ui = ui; this.stage = stage;
     ui.innerHTML = `
       <div id="topleft" class="glass">
-        <span class="app-name">GSEditor</span>
+        <span class="app-name" id="appName" title="Quick guide">GSEditor</span>
+        <button class="ico" id="helpBtn" title="Quick guide"><i class="ti ti-help"></i></button>
         <button class="ico" id="themeBtn" title="Light / dark"><i class="ti ti-moon ic-moon"></i><i class="ti ti-sun ic-sun"></i></button>
       </div>
+      <aside id="guide" class="glass" aria-label="Quick guide">
+        <div class="g-head"><b>使い方</b><span class="dim">左へドラッグか × で閉じる</span><button class="ico" id="guideClose" title="Close (Esc)"><i class="ti ti-x"></i></button></div>
+        <div class="g-body">
+          <h4>開く</h4>
+          <p>GS ファイル（.ply / .spz / .splat / .ksplat）を画面にドロップ。浮いたゴミは自動で消える（<kbd>Ctrl+Z</kbd> で戻る）</p>
+          <h4>見る</h4>
+          <dl><dt><kbd>中ドラッグ</kbd></dt><dd>回す</dd><dt><kbd>Shift</kbd> + <kbd>中ドラッグ</kbd></dt><dd>平行移動</dd><dt><kbd>ホイール</kbd></dt><dd>前後</dd>
+          <dt>右上のキューブ</dt><dd>真上・正面・横から</dd><dt><kbd>ダブルクリック</kbd></dt><dd>そこへ寄る</dd><dt><kbd>Space</kbd> 押している間</dt><dd>撮影時の見た目（影あり）</dd></dl>
+          <h4>選んで消す</h4>
+          <dl><dt><kbd>左ドラッグ</kbd></dt><dd>範囲で選ぶ（<kbd>W</kbd> で 箱 → 丸 → 投げ縄）</dd><dt><kbd>Shift</kbd> / <kbd>Ctrl</kbd></dt><dd>足す / 減らす</dd>
+          <dt><kbd>A</kbd> / <kbd>Alt+A</kbd></dt><dd>全部選ぶ / 解除</dd><dt><kbd>Ctrl+I</kbd></dt><dd>反転</dd><dt><kbd>X</kbd></dt><dd>消す</dd></dl>
+          <h4>分ける</h4>
+          <dl><dt><kbd>P</kbd></dt><dd>選んだ粒を別のオブジェクトに</dd><dt><kbd>F2</kbd></dt><dd>名前を変える（Outliner のダブルクリックでも）</dd></dl>
+          <h4>原点と向き</h4>
+          <dl><dt><kbd>O</kbd> → クリック</dt><dd>原点をそこに（右クリック → Set Origin Here でも）</dd><dt><kbd>Alt+G</kbd></dt><dd>原点を世界の中心へ</dd>
+          <dt><kbd>G</kbd> / <kbd>R</kbd> / <kbd>S</kbd></dt><dd>動かす / 回す / 大きさ。<kbd>R</kbd> <kbd>Z</kbd> <kbd>90</kbd> <kbd>Enter</kbd> のように数値も</dd><dt><kbd>Ctrl+A</kbd></dt><dd>今の位置・向きを 0 に</dd></dl>
+          <h4>見やすくする</h4>
+          <p>左の箱・球のボタンで Clip Volume。範囲の外を一時的に隠す（書き出しには影響しない）</p>
+          <h4>書き出す</h4>
+          <p>右下の Export。<b>Each object → own file</b> で分けたものを1つずつ。<b>.ply — Blender (Z up)</b> は Blender にそのまま立って入る。<b>Keep</b> で間引き</p>
+          <h4>戻す</h4>
+          <dl><dt><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Shift+Z</kbd></dt><dd>戻る / 進む。右の History から好きな所へ</dd></dl>
+        </div>
+      </aside>
 
       <nav id="tools" class="glass">
         <div class="tgroup">
@@ -225,6 +250,7 @@ export class Editor {
     let saved: string | null = null; try { saved = localStorage.getItem(TKEY); localStorage.removeItem("gseditor-theme"); } catch { /* ignore */ }
     apply(saved || (sysDark.matches ? "dark" : "light"), false);
     sysDark.addEventListener("change", () => { try { if (!localStorage.getItem(TKEY)) apply(sysDark.matches ? "dark" : "light", false); } catch { /* ignore */ } });
+    this.wireGuide(q("guide"), [q("appName"), q("helpBtn")], q("guideClose"));
     q<HTMLButtonElement>("themeBtn").onclick = () => apply(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
   }
 
@@ -300,6 +326,31 @@ export class Editor {
     const finish = (keep: boolean) => { if (done) return; done = true; const v = input.value.trim(); input.replaceWith(span); if (keep && v && v !== span.textContent) this.onRename(id, v); };
     input.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") finish(true); else if (e.key === "Escape") finish(false); });
     input.addEventListener("blur", () => finish(true));
+  }
+  /**
+   * The quick guide: slides in from the left (title or ?), closes with ×, Esc, the title
+   * again, or by dragging it back to the left.
+   */
+  private wireGuide(g: HTMLElement, openers: HTMLElement[], close: HTMLElement) {
+    const set = (on: boolean) => { g.classList.toggle("open", on); g.style.transform = ""; };
+    for (const o of openers) o.addEventListener("click", () => set(!g.classList.contains("open")));
+    close.addEventListener("click", () => set(false));
+    window.addEventListener("keydown", (e) => { if (e.key === "Escape" && g.classList.contains("open")) { e.stopImmediatePropagation(); set(false); } }, { capture: true });
+    let drag: { x: number; y: number; on: boolean; id: number } | null = null;
+    g.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).closest("button")) return; drag = { x: e.clientX, y: e.clientY, on: false, id: e.pointerId }; });
+    g.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.on) { if (Math.abs(dx) < 6 || Math.abs(dx) < Math.abs(dy)) return; drag.on = true; g.classList.add("dragging"); try { g.setPointerCapture(drag.id); } catch { /* ignore */ } }
+      g.style.transform = `translateX(${Math.min(0, dx)}px)`;
+    });
+    const end = (e: PointerEvent) => {
+      if (!drag) return;
+      const moved = drag.on, dx = e.clientX - drag.x; drag = null;
+      g.classList.remove("dragging");
+      if (moved) set(dx > -70);   // far enough to the left: it goes
+    };
+    g.addEventListener("pointerup", end); g.addEventListener("pointercancel", end);
   }
   /** Which detail sections apply to the active item (Transform / Dimensions / Info for an object, the volume panel for a volume). */
   setActiveKind(k: "object" | "volume" | null) {

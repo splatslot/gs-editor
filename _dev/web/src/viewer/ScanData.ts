@@ -366,8 +366,9 @@ export class ScanData {
   selectionCenter(world: THREE.Matrix4) { return this.centroid ? new THREE.Vector3(this.centroid[0], this.centroid[1], this.centroid[2]).applyMatrix4(world) : null; }
 
   /**
-   * Surface pick on the DRAWN splats (orbit pivot, focus, origin): the nearest one inside
-   * a thin cone around the ray, over an even sample of at most ~400k.
+   * Surface pick on the DRAWN splats (orbit pivot, focus, origin): the depth of the nearest
+   * one inside a thin cone around the ray (over an even sample of at most ~400k), and the
+   * point ON the ray at that depth — exactly under the cursor, not snapped to a splat centre.
    */
   pickRay(ray: THREE.Ray, world: THREE.Matrix4, tanThr = 0.006): THREE.Vector3 | null {
     if (!this.ready) return null;
@@ -376,7 +377,7 @@ export class ScanData {
     const o = ray.origin.clone().applyMatrix4(inv);
     const d = ray.direction.clone().transformDirection(inv);
     const step = Math.max(1, Math.ceil(m / 400000)), thr2 = tanThr * tanThr;
-    let bestT = Infinity, bx = 0, by = 0, bz = 0, found = false;
+    let bestT = Infinity, found = false;
     for (let j = 0; j < m; j += step) {
       if (this.dst[j] & (HIDDEN | CLIP)) continue;
       const w1 = words[j * 4 + 1];
@@ -384,9 +385,9 @@ export class ScanData {
       const vx = x - o.x, vy = y - o.y, vz = z - o.z;
       const t = vx * d.x + vy * d.y + vz * d.z;
       if (t <= 1e-4 || t >= bestT) continue;
-      if (vx * vx + vy * vy + vz * vz - t * t < thr2 * t * t) { bestT = t; bx = x; by = y; bz = z; found = true; }
+      if (vx * vx + vy * vy + vz * vz - t * t < thr2 * t * t) { bestT = t; found = true; }
     }
-    return found ? new THREE.Vector3(bx, by, bz).applyMatrix4(world) : null;
+    return found ? new THREE.Vector3(o.x + d.x * bestT, o.y + d.y * bestT, o.z + d.z * bestT).applyMatrix4(world) : null;
   }
 
   /** Run `fn` with the full set's words untouched (no tint, no hidden scales) — for the fallback export. */

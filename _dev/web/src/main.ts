@@ -140,12 +140,24 @@ async function boot() {
   let drag: { state: FrameJSON | null; vol: { center: THREE.Vector3; size: THREE.Vector3; radius: number } | null; lastP: THREE.Vector3; lastQ: THREE.Quaternion; lastS: THREE.Vector3 } | null = null;
   const anchor = () => { const o = activeObj(); if (o) return o.frame.worldPivot(); const v = activeVol(); return v ? v.center.clone() : null; };
   const syncProxy = () => { if (gizmo.dragging) return; const a = anchor(); if (a) proxy.position.copy(a); proxy.quaternion.identity(); proxy.scale.setScalar(1); };
+  // where the last press happened and whether it moved — a press on a gizmo handle that never
+  // moves is a click (the Origin tool then sets the origin there, as anywhere else)
+  let press: { x: number; y: number; moved: boolean } | null = null;
+  window.addEventListener("pointerdown", (e) => { press = { x: e.clientX, y: e.clientY, moved: false }; }, { capture: true });
+  window.addEventListener("pointermove", (e) => { if (press && e.buttons && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 3) press.moved = true; }, { capture: true });
   gizmo.addEventListener("dragging-changed", (e) => {
     const on = !!(e as any).value;
     nav.setGizmoDragging(on);
     const o = activeObj(), v = activeVol();
     if (on) drag = { state: o ? o.frame.toJSON() : null, vol: v ? { center: v.center.clone(), size: v.size.clone(), radius: v.radius } : null, lastP: proxy.position.clone(), lastQ: proxy.quaternion.clone(), lastS: proxy.scale.clone() };
-    else { if (drag?.state && o) recordFrameStep(o, drag.state, o.frame.toJSON(), tool === "origin" ? "原点を移動" : undefined); if (drag?.vol && v) volumeChanged(v, true); drag = null; syncProxy(); }
+    else {
+      // a fine drag of a pixel or two still moves the origin: only a press that changed nothing is a click
+      const untouched = !!drag?.state && !!o && JSON.stringify(drag.state) === JSON.stringify(o.frame.toJSON());
+      if (drag?.state && o) recordFrameStep(o, drag.state, o.frame.toJSON(), tool === "origin" ? "原点を移動" : undefined);
+      if (drag?.vol && v) volumeChanged(v, true);
+      drag = null; syncProxy();
+      if (tool === "origin" && o && untouched && press && !press.moved) { const hit = pickAt(press.x, press.y); if (hit) setOriginAt(o, hit.point); }
+    }
   });
   gizmo.addEventListener("objectChange", () => {
     if (!drag) return;
