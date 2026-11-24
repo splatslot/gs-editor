@@ -12,6 +12,12 @@ export interface HistoryEntry {
   label: string;
   undo: () => void;
   redo: () => void;
+  /**
+   * Called when the entry leaves the list for good (cut from the future by a new edit,
+   * dropped from the bottom, or cleared). `applied` says whether its effect is in place —
+   * an entry that holds a detached object frees it here when it was undone.
+   */
+  discard?: (applied: boolean) => void;
 }
 
 export interface HistoryRow { label: string; applied: boolean; }
@@ -37,9 +43,9 @@ export class History {
 
   /** Record an edit that has ALREADY been applied. Discards any redo-able future. */
   push(entry: HistoryEntry) {
-    this.entries.length = this.pos;
+    for (const e of this.entries.splice(this.pos)) e.discard?.(false);
     this.entries.push(entry);
-    if (this.entries.length > History.MAX) { this.entries.shift(); this.dropped++; }
+    if (this.entries.length > History.MAX) { this.entries.shift()!.discard?.(true); this.dropped++; }
     this.pos = this.entries.length;
     this.changed();
   }
@@ -56,5 +62,5 @@ export class History {
   undo(): boolean { if (!this.canUndo) return false; this.goTo(this.pos - 1); return true; }
   redo(): boolean { if (!this.canRedo) return false; this.goTo(this.pos + 1); return true; }
 
-  clear() { this.entries = []; this.pos = 0; this.dropped = 0; this.changed(); }
+  clear() { this.entries.forEach((e, i) => e.discard?.(i < this.pos)); this.entries = []; this.pos = 0; this.dropped = 0; this.changed(); }
 }

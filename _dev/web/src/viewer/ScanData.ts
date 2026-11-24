@@ -126,34 +126,70 @@ export class ScanData {
     return this.display;
   }
 
-  /**
-   * Which `max` splats to draw. "area": the ones that cover the most — opacity times the
-   * two largest axes, all read straight from the log-encoded bytes, ranked with a
-   * histogram (no sort over tens of millions). "stride": every k-th.
-   */
+  /** Which `max` splats to draw: the ones that cover the most ("area"), or every k-th ("stride"). */
   private pickDrawn(): Uint32Array {
-    const n = this.n, m = Math.min(n, this.max), w = this.full.packedArray!;
+    const n = this.n, m = Math.min(n, this.max);
     if (ScanData.thin === "stride") {
       const k = Math.ceil(n / m), out = new Uint32Array(Math.ceil(n / k));
       for (let j = 0; j < out.length; j++) out[j] = j * k;
       return out;
     }
+    return this.topByCoverage(null, m);
+  }
+
+  /** Word 0 (colour + opacity) / word 3 (scales) of splat i as loaded — no selection tint, no hidden or clipped zero size. */
+  private word0(i: number) { return this.display === this.full ? this.orig0[i] : this.full.packedArray![i * 4]; }
+  private word3(i: number) { return this.display === this.full ? this.orig3[i] : this.full.packedArray![i * 4 + 3]; }
+
+  /**
+   * The `m` splats of `rows` (all splats when null) that cover the most — opacity times the
+   * two largest axes, read straight from the log-encoded bytes and ranked with a histogram
+   * (no sort over tens of millions). Returned ascending, like `rows`.
+   */
+  private topByCoverage(rows: Uint32Array | null, m: number): Uint32Array {
+    const N = rows ? rows.length : this.n;
+    if (m >= N) return rows ?? Uint32Array.from({ length: N }, (_, i) => i);
     const enc = this.full.splatEncoding ?? {};
     const step = ((enc.lnScaleMax ?? 9) - (enc.lnScaleMin ?? -12)) / 254;
     const opT = new Int16Array(256);
     for (let o = 0; o < 256; o++) opT[o] = o === 0 ? -2000 : Math.round(Math.log(o / 255) / step);
-    const key = new Uint16Array(n), hist = new Uint32Array(2048);
-    for (let i = 0; i < n; i++) {
-      const w3 = w[i * 4 + 3], a = w3 & 255, b = (w3 >>> 8) & 255, c = (w3 >>> 16) & 255;
-      const kk = Math.max(0, Math.min(2047, a + b + c - Math.min(a, b, c) + opT[w[i * 4] >>> 24] + 1024));
-      key[i] = kk; hist[kk]++;
+    const key = new Uint16Array(N), hist = new Uint32Array(2048);
+    for (let k = 0; k < N; k++) {
+      const i = rows ? rows[k] : k, w3 = this.word3(i), a = w3 & 255, b = (w3 >>> 8) & 255, c = (w3 >>> 16) & 255;
+      const kk = Math.max(0, Math.min(2047, a + b + c - Math.min(a, b, c) + opT[this.word0(i) >>> 24] + 1024));
+      key[k] = kk; hist[kk]++;
     }
     let tb = 2047, acc = 0;
     while (tb > 0 && acc + hist[tb] < m) acc += hist[tb--];
     let room = m - acc; // how many of the threshold bin still fit
     const out = new Uint32Array(m); let q = 0;
-    for (let i = 0; i < n && q < m; i++) { const kk = key[i]; if (kk > tb || (kk === tb && room-- > 0)) out[q++] = i; }
+    for (let k = 0; k < N && q < m; k++) { const kk = key[k]; if (kk > tb || (kk === tb && room-- > 0)) out[q++] = rows ? rows[k] : k; }
     return q === m ? out : out.slice(0, q);
+  }
+
+  /** Thin a set of rows for export: keep the `keep` fraction (0..1) that covers the most. */
+  thin(rows: Uint32Array, keep: number): Uint32Array {
+    return keep >= 1 ? rows : this.topByCoverage(rows, Math.max(1, Math.round(rows.length * keep)));
+  }
+
+  /** The selected splats (indices into this scan, ascending). */
+  selectedIndices() { return this.call<Uint32Array>("selectedIdx"); }
+  /** Centres (file space) of the given splats, xyz interleaved. */
+  centresAt(idx: Uint32Array) { return this.call<Float32Array>("centresAt", { idx }); }
+
+  /** A new CPU splat set holding just `idx`, as loaded (SH included) — the body of a separated object. */
+  extract(idx: Uint32Array): PackedSplats {
+    const m = idx.length, enc = this.full.splatEncoding ?? {};
+    const ps = new PackedSplats({ maxSplats: m, splatEncoding: { ...enc } });
+    const dst = ps.ensureSplats(m), src = this.full.packedArray!;
+    for (let j = 0; j < m; j++) { const i = idx[j], s = i * 4, d = j * 4; dst[d] = this.word0(i); dst[d + 1] = src[s + 1]; dst[d + 2] = src[s + 2]; dst[d + 3] = this.word3(i); }
+    for (const L of [1, 2, 3]) {
+      const sa = this.full.extra["sh" + L] as Uint32Array | undefined; if (!sa) continue;
+      const w = SH_WORDS[L], da = ps.ensureSplatsSh(L, m);
+      for (let j = 0; j < m; j++) { const s = idx[j] * w, d = j * w; for (let q = 0; q < w; q++) da[d + q] = sa[s + q]; }
+    }
+    ps.numSplats = m;
+    return ps;
   }
   /** Let go of a drawn copy that is no longer on screen. */
   release(old: PackedSplats) { if (old === this.full) freeGpu(old); else old.dispose(); }

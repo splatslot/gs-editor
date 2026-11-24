@@ -1,17 +1,19 @@
 export type Tool = "select" | "move" | "rotate" | "scale" | "origin";
 export type SelectVariant = "box" | "circle" | "lasso";
-export type CtxAction = "delete" | "invert" | "selectAll" | "deselect" | "setOrigin" | "focus";
-export type ObjectAction = "activate" | "toggle" | "remove";
+export type CtxAction = "delete" | "separate" | "invert" | "selectAll" | "deselect" | "setOrigin" | "focus";
+export type ObjectAction = "activate" | "toggle" | "remove" | "rename";
+export type ExportWhat = "each" | "one" | "active";
 export type VolumeKind = "box" | "sphere";
 
 export interface EditorCallbacks {
   onTool: (t: Tool) => void;
   onSelectVariant: (v: SelectVariant) => void;
   onReplaceFile: (f: File) => void;
-  onExport: (fmt: string) => void;
+  /** fmt; what: each object to its own file / all into one / the active one; keep: fraction of splats to keep (thinned by coverage). */
+  onExport: (fmt: string, what: ExportWhat, keep: number) => void;
   onTheme: (t: "dark" | "light") => void;
   onContext: (a: CtxAction) => void;
-  onObject: (a: ObjectAction, id: number) => void;
+  onObject: (a: ObjectAction, id: number, value?: string) => void;
   onAddVolume: (kind: VolumeKind) => void;
   onDimsVisible: (on: boolean) => void;
   onVolumeShow: (on: boolean) => void;
@@ -108,8 +110,9 @@ export class Editor {
         </section>
         <section class="dsec" id="dsec-history"><h3><i class="ti ti-chevron-down"></i>History <span class="dim">クリックで戻る</span></h3><div class="dbody" id="dock-history"></div></section>
         <section class="dsec" id="dsec-export">
-          <div class="exp-row"><select id="exp-fmt"><option value="spz">.spz — small file</option><option value="ply">.ply — universal</option><option value="splat">.splat — base color only</option></select></div>
-          <button class="cta big" id="exp-go" title="Save all visible objects as one file with deletions, origins, rotations and scales baked in"><i class="ti ti-download"></i> Export</button>
+          <div class="exp-row"><select id="exp-what" title="Which objects go into which file"><option value="each">Each object → own file</option><option value="one">All visible → one file</option><option value="active">Active object only</option></select></div>
+          <div class="exp-row two"><select id="exp-fmt"><option value="spz">.spz — small file</option><option value="ply">.ply — universal</option><option value="splat">.splat — base color only</option></select><select id="exp-keep" title="Thin the export: keeps the splats that matter most (largest, most opaque)"><option value="1">All splats</option><option value="0.5">Keep 50%</option><option value="0.25">Keep 25%</option><option value="0.1">Keep 10%</option></select></div>
+          <button class="cta big" id="exp-go" title="Save with deletions, origins, rotations and scales baked in"><i class="ti ti-download"></i> Export</button>
         </section>
       </aside>
 
@@ -123,6 +126,7 @@ export class Editor {
         <div id="numinput" class="glass hidden"></div>
         <div id="ctxmenu" class="glass hidden">
           <button data-act="delete"><i class="ti ti-trash"></i>Delete Selected<kbd>X</kbd></button>
+          <button data-act="separate"><i class="ti ti-cut"></i>Separate Selection<kbd>P</kbd></button>
           <button data-act="invert"><i class="ti ti-switch-horizontal"></i>Invert Selection<kbd>Ctrl+I</kbd></button>
           <button data-act="selectAll"><i class="ti ti-square-check"></i>Select All<kbd>A</kbd></button>
           <button data-act="deselect"><i class="ti ti-square-off"></i>Deselect All<kbd>Alt+A</kbd></button>
@@ -188,15 +192,21 @@ export class Editor {
     // a dropdown keeps keyboard focus after a pick, which mutes the shortcuts (X, Ctrl+Z …) until the next click
     for (const sel of Array.from(ui.querySelectorAll("select"))) sel.addEventListener("change", () => (sel as HTMLSelectElement).blur());
     this.replacePick.onchange = () => { const f = this.replacePick.files?.[0]; if (f) cb.onReplaceFile(f); this.replacePick.value = ""; };
-    q<HTMLButtonElement>("exp-go").onclick = () => cb.onExport(this.fmtSel.value);
+    q<HTMLButtonElement>("exp-go").onclick = () => cb.onExport(this.fmtSel.value, q<HTMLSelectElement>("exp-what").value as ExportWhat, Number(q<HTMLSelectElement>("exp-keep").value));
+    this.onRename = (id, v) => cb.onObject("rename", id, v);
     // objects
     this.objList.addEventListener("click", (e) => {
       const row = (e.target as HTMLElement).closest(".orow") as HTMLElement | null; if (!row) return;
       const id = +row.dataset.id!;
       const t = e.target as HTMLElement;
+      if (t.closest(".rename")) return;
       if (t.closest(".eye")) cb.onObject("toggle", id);
       else if (t.closest(".ox")) cb.onObject("remove", id);
       else cb.onObject("activate", id);
+    });
+    this.objList.addEventListener("dblclick", (e) => {
+      const row = (e.target as HTMLElement).closest(".orow") as HTMLElement | null;
+      if (row && (e.target as HTMLElement).closest(".oname")) this.startRename(+row.dataset.id!);
     });
     // context menu
     this.ctx.addEventListener("click", (e) => {
@@ -272,6 +282,19 @@ export class Editor {
       `<div class="orow${r.active ? " on" : ""}${r.visible ? "" : " off"}" data-id="${r.id}" title="${esc(r.name)}"><button class="eye" title="${r.kind === "object" ? "Show / hide" : "Enable / disable"}"><i class="ti ${r.visible ? "ti-eye" : "ti-eye-off"}"></i></button><i class="ti okind ${icon(r.kind)}"></i><span class="oname">${esc(r.name)}</span><span class="ocount">${r.kind === "object" ? (r.splats >= 1e6 ? (r.splats / 1e6).toFixed(1) + "M" : Math.round(r.splats / 1000) + "k") : ""}</span><button class="ox" title="Remove"><i class="ti ti-x"></i></button></div>`).join("")
       : `<div class="note">No objects yet — add files above</div>`;
   }
+  private onRename: (id: number, name: string) => void = () => {};
+  /** Rename an Outliner row in place (double-click, or F2 for the active one): Enter keeps, Esc or an empty name cancels. */
+  startRename(id: number) {
+    const row = this.objList.querySelector(`.orow[data-id="${id}"]`) as HTMLElement | null;
+    const span = row?.querySelector(".oname") as HTMLElement | null; if (!row || !span) return;
+    const input = document.createElement("input");
+    input.className = "rename"; input.value = span.textContent || ""; input.spellcheck = false;
+    span.replaceWith(input); input.focus(); input.select();
+    let done = false;
+    const finish = (keep: boolean) => { if (done) return; done = true; const v = input.value.trim(); input.replaceWith(span); if (keep && v && v !== span.textContent) this.onRename(id, v); };
+    input.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") finish(true); else if (e.key === "Escape") finish(false); });
+    input.addEventListener("blur", () => finish(true));
+  }
   /** Which detail sections apply to the active item (Transform / Dimensions / Info for an object, the volume panel for a volume). */
   setActiveKind(k: "object" | "volume" | null) {
     for (const id of ["dsec-transform", "dsec-dims", "dsec-info"]) (this.ui.querySelector("#" + id) as HTMLElement).classList.toggle("hidden", k !== "object");
@@ -298,7 +321,7 @@ export class Editor {
   setNumInput(text: string | null) { this.numEl.classList.toggle("hidden", !text); this.numEl.textContent = text || ""; }
   showContextMenu(x: number, y: number, hasSelection: boolean, hasScene: boolean) {
     this.ctx.classList.remove("hidden");
-    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=delete],[data-act=deselect]").forEach((b) => (b.disabled = !hasSelection));
+    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=delete],[data-act=separate],[data-act=deselect]").forEach((b) => (b.disabled = !hasSelection));
     this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=invert],[data-act=selectAll],[data-act=setOrigin],[data-act=focus]").forEach((b) => (b.disabled = !hasScene));
     const r = this.stage.getBoundingClientRect();
     const w = this.ctx.offsetWidth, h = this.ctx.offsetHeight;

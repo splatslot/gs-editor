@@ -209,6 +209,18 @@ const ops: Record<string, (a: any) => { value: any; transfer?: Transferable[] } 
     const res = out.slice(0, o);
     return { value: res, transfer: [res.buffer] };
   },
+  /** The selected splats, ascending (for Separate). */
+  selectedIdx() {
+    const out = new Uint32Array(selCount); let q = 0;
+    for (let i = 0; i < n && q < out.length; i++) if (st[i] & SEL) out[q++] = i;
+    return { value: out, transfer: [out.buffer] };
+  },
+  /** Centres (file space) of the given splats, xyz interleaved. */
+  centresAt(a: { idx: Uint32Array }) {
+    const out = new Float32Array(a.idx.length * 3);
+    for (let q = 0; q < a.idx.length; q++) { const j = a.idx[q] * 3; out[q * 3] = H[c[j]]; out[q * 3 + 1] = H[c[j + 1]]; out[q * 3 + 2] = H[c[j + 2]]; }
+    return { value: out, transfer: [out.buffer] };
+  },
   /** Rows the export keeps: every splat not deleted (clip volumes are a view aid only). */
   exportRows() {
     const out = new Uint32Array(n - hidCount); let q = 0;

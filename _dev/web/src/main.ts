@@ -11,12 +11,13 @@ import { SceneFrame, type FrameJSON } from "./viewer/SceneFrame";
 import { History } from "./viewer/History";
 import { HistoryPanel } from "./ui/HistoryPanel";
 import { startVfovRad } from "./viewer/startFrame";
-import { Editor, type ObjectRow, type SelectVariant, type Tool } from "./ui/Editor";
+import { Editor, type ExportWhat, type ObjectRow, type SelectVariant, type Tool } from "./ui/Editor";
 import { IntakePanel } from "./ui/IntakePanel";
 import { TransformPanel } from "./ui/TransformPanel";
 import { VolumePanel, type ClipVolume, type VolumeKind } from "./ui/VolumePanel";
 import { AXIS_TO_THREE, toBlender } from "./ui/blenderAxes";
-import { AlignmentError, bakeFiles, bakeFromSplats, downloadBlob, type BakePart, type FileSource, type GsFormat } from "./export/exportGS";
+import { bakeFiles, bakeFromSplats, downloadBlob, type FileSource, type GsFormat } from "./export/exportGS";
+import { plyLayout, plyRows } from "./export/plyRows";
 import type { SplatMesh } from "@sparkjsdev/spark";
 
 declare global { interface Window { __gseditor_ready?: boolean; showSaveFilePicker?: (o: any) => Promise<any>; } }
@@ -26,11 +27,15 @@ const GIZMO_TOOLS: Tool[] = ["move", "rotate", "scale", "origin"];
 const VARIANT_ORDER: SelectVariant[] = ["box", "circle", "lasso"];
 
 /** A loaded scan: its own transform (with origin), its splats and its per-splat edit state. */
-interface GsObject { id: number; name: string; source: { url: string; file?: File; name: string }; mesh: SplatMesh; frame: SceneFrame; data: ScanData; visible: boolean }
+/**
+ * A scan in the scene. `source.rowMap` is set on a piece made by Separate: piece index → row
+ * of the source file (the piece re-reads just those rows on export).
+ */
+interface GsObject { id: number; name: string; source: { url: string; file?: File; name: string; rowMap?: Uint32Array }; mesh: SplatMesh; frame: SceneFrame; data: ScanData; visible: boolean }
 type Active = { kind: "object"; obj: GsObject } | { kind: "volume"; vol: ClipVolume } | null;
 
 const HINTS: Record<string, string> = {
-  box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   Wheel: zoom   X: delete   W: next select tool   RMB: menu",
+  box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   Wheel: zoom   X: delete   P: separate   W: next select tool   RMB: menu",
   circle: "LMB drag: paint select (Shift add, Ctrl subtract)   Shift+Wheel or [ ]: radius   MMB: orbit   X: delete   W: next select tool",
   lasso: "LMB drag: lasso select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   X: delete   W: next select tool",
   move: "Drag the handles   X / Y / Z: lock an axis   Type a number, Enter   Ctrl: snap   Alt+G: clear   Esc: back to select",
@@ -76,18 +81,20 @@ async function boot() {
     onTool: (t) => setTool(t),
     onSelectVariant: (v) => { variant = v; setTool("select"); },
     onReplaceFile: (f) => { const o = activeObj(); if (o) void replaceObject(o, URL.createObjectURL(f), f.name, f); else editor.setMessage("Make an object active first"); },
-    onExport: (fmt) => void exportGS(fmt as GsFormat),
+    onExport: (fmt, what, keep) => void exportGS(fmt as GsFormat, what, keep),
     onTheme: (t) => scene.setBackground(t === "light" ? 0xd9dad4 : 0x0e110d),
     onContext: (a) => {
       if (a === "delete") void deleteSelection();
+      else if (a === "separate") void separateSelection();
       else if (a === "invert") void selOp((o) => o.data.invert());
       else if (a === "deselect") void deselectAll();
       else if (a === "selectAll") void selOp((o) => o.data.selectAll());
       else if (a === "focus") { const p = pickAt(ctxAt.x, ctxAt.y); if (p) nav.focusOn(p.point); }
       else if (a === "setOrigin") { const p = pickAt(ctxAt.x, ctxAt.y); const o = activeObj(); if (p && o) setOriginAt(o, p.point); else editor.setMessage(o ? "Nothing under the cursor — right-click on the scan" : "Make an object active first"); }
     },
-    onObject: (a, id) => {
+    onObject: (a, id, value) => {
       const o = objects.find((x) => x.id === id), v = volumes.find((x) => x.id === id);
+      if (a === "rename") { const t = o ?? v; if (t && value) { t.name = value; refreshOutliner(); updateInfo(); if (v && activeVol() === v) volPanel.set(v); } return; }
       if (a === "activate") setActive(o ? { kind: "object", obj: o } : v ? { kind: "volume", vol: v } : null);
       else if (a === "toggle") { if (o) { o.visible = !o.visible; o.frame.root.visible = o.visible; void o.data.deselectAll().then(syncSelection); } if (v) v.enabled = !v.enabled; scheduleClip(); refreshOutliner(); syncSelection(); }
       else if (a === "remove") { if (o) removeObject(o); if (v) removeVolume(v); }
@@ -609,7 +616,7 @@ async function boot() {
     const o = activeObj();
     if (!o) { editor.setInfo(null); return; }
     const d = o.data, drawn = d.drawnCount;
-    editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.file?.size ?? 0, total: d.n, visible: d.n - d.hidden,
+    editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.rowMap ? 0 : o.source.file?.size ?? 0, total: d.n, visible: d.n - d.hidden,
       sceneTotal: objects.reduce((a, x) => a + x.data.n, 0), sceneDrawn: shownObjects().reduce((a, x) => a + x.data.drawnCount, 0),
       drawn, light: d.n > lightMax ? d.light : null });
   };
@@ -679,6 +686,8 @@ async function boot() {
       case "KeyO": setTool("origin"); return;
       case "KeyA": void selOp((o) => o.data.selectAll()); return;
       case "KeyX": case "Delete": void deleteSelection(); return;
+      case "KeyP": void separateSelection(); return;
+      case "F2": { const id = activeObj()?.id ?? activeVol()?.id; if (id != null) { e.preventDefault(); editor.startRename(id); } return; }
       case "BracketLeft": circleR = Math.max(6, circleR / 1.2); return;
       case "BracketRight": circleR = Math.min(400, circleR * 1.2); return;
       case "Home": frameAll(); return;
@@ -701,47 +710,97 @@ async function boot() {
 
   // ── export: all shown objects into one file, saved where the user picks ──
   const FILE_FLIP_INV = new THREE.Matrix4().makeRotationFromQuaternion(SplatScene.FILE_FLIP.clone().invert());
-  async function exportGS(fmt: GsFormat) {
-    const list = shownObjects();
-    if (!list.length) { editor.setMessage("Nothing to export"); return; }
-    const base = list.length === 1 ? list[0].source.name.replace(/\.[^.]+$/, "").replace(/_fixed$/, "") : "scene";
-    const outName = `${base}_fixed.${fmt}`;
-    // ask WHERE first (the picker needs the click's user activation; baking takes seconds)
-    let handle: any = null;
-    if (window.showSaveFilePicker) {
-      try { handle = await window.showSaveFilePicker({ suggestedName: outName, types: [{ description: `Gaussian splats (.${fmt})`, accept: { "application/octet-stream": [`.${fmt}`] } }] }); }
+  /**
+   * Export. `what`: each object to its own file (the pieces made with Separate), all visible
+   * objects into one file, or the active one only. `keep` < 1 thins by coverage (the
+   * largest, most opaque splats stay). Each file re-reads its source — a PLY only the rows
+   * it needs, slice by slice, so sources over 2 GB still export at full quality.
+   */
+  async function exportGS(fmt: GsFormat, what: ExportWhat, keep: number) {
+    const list = what === "active" ? (activeObj() ? [activeObj()!] : []) : shownObjects();
+    if (!list.length) { editor.setMessage(what === "active" ? "Make an object active first" : "Nothing to export"); return; }
+    const each = what === "each" && list.length > 1;
+    const safe = (s: string) => s.replace(/\.(ply|spz|splat|ksplat|sog)$/i, "").replace(/_fixed$/, "").replace(/[\\/:*?"<>|]+/g, "_").trim() || "scene";
+    const fileName = (objs: GsObject[]) => `${objs.length === 1 ? safe(objs[0].name) : "scene"}${keep < 1 ? `_${Math.round(keep * 100)}pct` : ""}_fixed.${fmt}`;
+    const types = [{ description: `Gaussian splats (.${fmt})`, accept: { "application/octet-stream": [`.${fmt}`] } }];
+    // ask WHERE first (the pickers need the click's user activation; baking takes a while)
+    let dir: any = null, handle: any = null;
+    const w = window as any;
+    if (each && w.showDirectoryPicker) {
+      try { dir = await w.showDirectoryPicker({ id: "gseditor-export", mode: "readwrite" }); }
+      catch (e: any) { if (e?.name === "AbortError") { editor.setMessage("Export cancelled"); return; } dir = null; }
+    } else if (!each && window.showSaveFilePicker) {
+      try { handle = await window.showSaveFilePicker({ suggestedName: fileName(list), types }); }
       catch (e: any) { if (e?.name === "AbortError") { editor.setMessage("Export cancelled"); return; } handle = null; }
     }
-    const finalName = handle?.name || outName;
-    editor.setMessage(`Exporting ${finalName}…`, 0);
     editor.setLoading(true);
     const log = (t: string) => editor.setMessage(t, 0);
     try {
       await settle();
-      const parts = await Promise.all(list.map(async (o) => { o.mesh.updateMatrixWorld(true); return { o, part: { rows: await o.data.exportRows(), matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) } as BakePart }; }));
-      let blob: Blob;
-      try {
-        const sources: FileSource[] = [];
-        for (const { o, part } of parts) {
-          const data = o.source.file ? new Uint8Array(await o.source.file.arrayBuffer()) : new Uint8Array(await (await fetch(o.source.url)).arrayBuffer());
-          sources.push({ data, filename: o.source.name, parts: [part], refs: await o.data.refPoints(64) });
-        }
-        blob = await bakeFiles(sources, fmt, finalName, log);
-      } catch (e) {
-        console.warn("full-quality export failed, using viewer data:", e);
-        editor.setMessage(e instanceof AlignmentError ? "Row order differs from the source: exporting the viewer data (base color only)" : "Could not re-read the source: exporting the viewer data (base color only)", 0);
-        // the full splats, with any selection tint / delete marks taken off while baking
-        const bake = (i: number): Promise<Blob> => i < parts.length ? parts[i].o.data.withPristine(() => bake(i + 1))
-          : bakeFromSplats(parts.map(({ o, part }) => ({ packed: o.data.full as any, rows: part.rows, matrix: part.matrix })), fmt, finalName, log);
-        blob = await bake(0);
+      const groups = each ? list.map((o) => [o]) : [list];
+      let bytes = 0;
+      const lowQ: string[] = [];
+      for (let g = 0; g < groups.length; g++) {
+        const name = g === 0 && handle?.name ? handle.name : fileName(groups[g]);
+        const tag = groups.length > 1 ? ` (${g + 1}/${groups.length})` : "";
+        log(`Exporting ${name}${tag}…`);
+        const { blob, lowQuality } = await bakeGroup(groups[g], fmt, keep, name, (t) => log(`${t}${tag}`));
+        if (lowQuality) lowQ.push(name);
+        const h = dir ? await dir.getFileHandle(name, { create: true }) : g === 0 ? handle : null;
+        if (h) { const out = await h.createWritable(); await out.write(blob); await out.close(); } else downloadBlob(blob, name);
+        bytes += blob.size;
       }
-      if (handle) { const w = await handle.createWritable(); await w.write(blob); await w.close(); }
-      else downloadBlob(blob, finalName);
-      editor.setMessage(`Exported ${finalName} (${(blob.size / 1048576).toFixed(1)} MB, ${list.length} object${list.length > 1 ? "s" : ""})${handle ? "" : " — downloaded"}`, 10000);
+      editor.setMessage(`Exported ${groups.length} file${groups.length > 1 ? "s" : ""} (${(bytes / 1048576).toFixed(1)} MB)${dir ? ` into ${dir.name}` : handle ? "" : " — downloaded"}`
+        + (lowQ.length ? ` — base colour only for ${lowQ.join(", ")}: the source could not be re-read` : ""), lowQ.length ? 0 : 12000);
     } catch (e) {
       console.error(e);
       editor.setMessage(`Export failed: ${e}`, 0);
     } finally { editor.setLoading(false); }
+  }
+
+  /** One output file from these objects: re-read their sources and bake; if that fails, bake the viewer data. */
+  async function bakeGroup(objs: GsObject[], fmt: GsFormat, keep: number, outName: string, log: (t: string) => void): Promise<{ blob: Blob; lowQuality: boolean }> {
+    const parts: { o: GsObject; rows: Uint32Array; matrix: THREE.Matrix4 }[] = [];
+    for (const o of objs) {
+      o.mesh.updateMatrixWorld(true);
+      let rows = await o.data.exportRows();
+      if (keep < 1) rows = o.data.thin(rows, keep);
+      parts.push({ o, rows, matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) });
+    }
+    try {
+      const sources: FileSource[] = [];
+      for (const pt of parts) sources.push(await readSource(pt.o, pt.rows, pt.matrix, log));
+      log("Baking…");
+      return { blob: await bakeFiles(sources, fmt, outName, log), lowQuality: false };
+    } catch (e) {
+      console.warn("full-quality export failed, using viewer data:", e);
+      // the full splats, with any selection tint / delete marks taken off while baking
+      const bake = (i: number): Promise<Blob> => i < parts.length ? parts[i].o.data.withPristine(() => bake(i + 1))
+        : bakeFromSplats(parts.map((pt) => ({ packed: pt.o.data.full as any, rows: pt.rows, matrix: pt.matrix })), fmt, outName, log);
+      return { blob: await bake(0), lowQuality: true };
+    }
+  }
+
+  /**
+   * The source bytes for one object's rows. A binary PLY is cut down to just those rows,
+   * read in slices (any file size — browsers cannot read a file over ~2 GB in one piece);
+   * other formats (.spz / .splat / .ksplat, small by nature) are read whole.
+   */
+  async function readSource(o: GsObject, rows: Uint32Array, matrix: THREE.Matrix4, log: (t: string) => void): Promise<FileSource> {
+    const file: Blob = o.source.file ?? await (await fetch(o.source.url)).blob();
+    const map = o.source.rowMap;
+    const fileRows = map ? rows.map((r) => map[r]) : rows;
+    // reference points spread over the rows: the reader's row order is checked against them
+    const pick = Uint32Array.from({ length: Math.min(64, rows.length) }, (_, k) => Math.floor((k * rows.length) / Math.min(64, rows.length)));
+    const xyz = await o.data.centresAt(pick.map((q) => rows[q]));
+    const ref = (index: number, k: number) => ({ index, x: xyz[k * 3], y: xyz[k * 3 + 1], z: xyz[k * 3 + 2] });
+    const layout = /\.ply$/i.test(o.source.name) ? await plyLayout(file) : null;
+    if (layout) {
+      const data = await plyRows(file, layout, fileRows, (f) => log(`Reading ${o.name}… ${Math.round(f * 100)}%`));
+      return { data, filename: o.source.name, parts: [{ rows: null, matrix }], refs: Array.from(pick, (q, k) => ref(q, k)) };
+    }
+    const data = new Uint8Array(await file.arrayBuffer());
+    return { data, filename: o.source.name, parts: [{ rows: fileRows, matrix }], refs: Array.from(pick, (q, k) => ref(fileRows[q], k)) };
   }
 
   // ── objects: add / replace / remove ──
@@ -831,6 +890,61 @@ async function boot() {
     } finally { editor.setLoading(false); updateInfo(); }
   }
 
+  // ── Separate (Blender's P): the selected splats become an object of their own ──
+  const detachObject = (o: GsObject) => {
+    const i = objects.indexOf(o); if (i >= 0) objects.splice(i, 1);
+    scene.scene.remove(o.frame.root);
+    const m = splat.meshes.indexOf(o.mesh); if (m >= 0) splat.meshes.splice(m, 1);
+  };
+  const attachObject = (o: GsObject) => { objects.push(o); scene.scene.add(o.frame.root); splat.meshes.push(o.mesh); };
+  let partNo = 1;
+  /**
+   * Each shown scan with a selection gives its selected splats to a new object: same place,
+   * a copy of the transform and origin, named <scan>_001… (rename: double-click or F2).
+   * The new object re-reads just those rows of the source file on export.
+   */
+  async function separateSelection() {
+    await settle();
+    const srcs = shownObjects().filter((o) => o.data.selected > 0);
+    if (!srcs.length) { editor.setMessage("Select splats first, then P to separate them into their own object"); return; }
+    editor.setLoading(true);
+    try {
+      const made: { from: GsObject; to: GsObject; batch: Uint32Array }[] = [];
+      for (const from of srcs) {
+        const sel = await from.data.selectedIndices();
+        const data = new ScanData(from.data.extract(sel), true, lightMax);
+        try { await data.init(); } catch (e) { data.dispose(); throw e; }
+        const frame = new SceneFrame(scene.scene);
+        frame.fromJSON(from.frame.toJSON());
+        const mesh = await splat.add(data.display, frame.root);
+        const map = from.source.rowMap;
+        const base = from.name.replace(/\.(ply|spz|splat|ksplat|sog)$/i, "").replace(/_\d{3}$/, "");
+        const to: GsObject = { id: nextId++, name: `${base}_${String(partNo++).padStart(3, "0")}`, source: { ...from.source, rowMap: map ? sel.map((i) => map[i]) : sel }, mesh, frame, data, visible: true };
+        objects.push(to);
+        wireFrame(to);
+        made.push({ from, to, batch: await from.data.hideSelected() });   // the splats now live in the new object
+      }
+      const last = made[made.length - 1].to;
+      setActive({ kind: "object", obj: last });
+      afterEdit(); scheduleClip();
+      history.push({
+        label: `分離 → ${made.map((m) => m.to.name).join(", ")}`,
+        undo: () => {
+          for (const m of made) { detachObject(m.to); void m.from.data.restore(m.batch).then(afterEdit); }
+          if (made.some((m) => activeObj() === m.to)) setActive({ kind: "object", obj: made[0].from }); else refreshOutliner();
+        },
+        redo: () => { for (const m of made) { attachObject(m.to); void m.from.data.hide(m.batch).then(afterEdit); } setActive({ kind: "object", obj: last }); },
+        // dropped while undone: the pieces are detached for good — free them
+        discard: (applied) => { if (!applied) for (const m of made) { splat.remove(m.to.mesh); m.to.data.dispose(); } },
+      });
+      const n = made.reduce((a, m) => a + m.to.data.n, 0);
+      editor.setMessage(`Separated ${n.toLocaleString()} splats into ${made.map((m) => m.to.name).join(", ")} — set its origin with O, rename with F2 or a double-click in the Outliner`, 10000);
+    } catch (e) {
+      console.error(e);
+      editor.setMessage(`Could not separate: ${e}`, 0);
+    } finally { editor.setLoading(false); }
+  }
+
   setTool("select"); setActive(null);
   const wanted = import.meta.env.DEV ? new URLSearchParams(location.search).get("gs") : null;
   if (wanted) { for (const w of wanted.split(",")) { const startUrl = `/${w.replace(/^\/+/, "")}`; await addObject(startUrl, decodeURIComponent(startUrl.split("/").pop() || "scene")); } }
@@ -850,7 +964,7 @@ async function boot() {
   scene.start();
 
   if (import.meta.env.DEV) {
-    (window as any).__pl = { scene, splat, nav, editor, gizmo, cam, history, panel, volPanel, setTool, viewFrom, addObject, addVolume, objects, volumes, exportGS, THREE, bakeFiles, bakeFromSplats, FILE_FLIP_INV, setDisplay, settle, lightMax,
+    (window as any).__pl = { scene, splat, nav, editor, gizmo, cam, history, panel, volPanel, setTool, viewFrom, addObject, addVolume, objects, volumes, exportGS, THREE, bakeFiles, bakeFromSplats, FILE_FLIP_INV, setDisplay, settle, lightMax, separateSelection, bakeGroup, readSource,
       get tool() { return tool; }, get variant() { return variant; }, get active() { return active; }, get obj() { return activeObj(); } };
   }
   window.__gseditor_ready = true;

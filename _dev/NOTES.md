@@ -55,6 +55,28 @@ npm --prefix _dev/web run typecheck  # tsc --noEmit
 - 見た目は design.md 準拠：暗い全面ビューにすりガラスのフローティング UI、`corner-shape: superellipse(2)`、IBM Plex、Tabler Icons。
   表示は英語（読み込みパネルと履歴の行だけ日本語）
 
+## Separate と書き出し（0.5.0）
+
+- **Separate**：選択した粒（`selectedIdx`）を `ScanData.extract` で新しい CPU の `PackedSplats` に写し（読み込んだままのワード：選択の色や
+  削除の 0 は外す）、新しい `ScanData`＋Worker＋描画を作る。transform と原点は元のオブジェクトの `frame.toJSON()` をコピー。
+  元からはその粒を削除扱い（`hideSelected`）にする。`source.rowMap` に「新しいオブジェクトの番号 → 元ファイルの行」を持たせ、
+  書き出しはその行だけを元ファイルから読み直す
+- 履歴：undo でオブジェクトを外し（`detachObject`、データは保持）、redo で戻す。`HistoryEntry.discard(applied)` で、undo 済みのまま
+  履歴から落ちたときにデータと Worker を解放する
+- **書き出し**：`what` = each（オブジェクトごとに別ファイル。`showDirectoryPicker` で保存先を1回だけ聞く）／ one（全部を1ファイル）／
+  active。`keep` < 1 は `ScanData.thin`（Light と同じ「不透明度×面積」の上位）
+- **2GB の壁**：Chromium は 2GB を超える File を `arrayBuffer()` で一括読みできない（1.9GB OK、2.2GB で NotReadableError）。
+  PLY は `export/plyRows.ts` で 64MB ずつ `File.slice` して、必要な行だけ（連続する行はまとめて）新しい PLY に写してから
+  splat-transform に渡す。.spz / .splat / .ksplat は小さいので従来どおり一括で読む
+- 実測（このPC、合成 9.9GB・4000万粒・SH3）：読み込み 46秒、Separate 約1秒、277万粒の PLY 書き出し 40秒（686MB）、
+  25% 間引き 18秒、SPZ 51秒（70MB）
+
+## Blender 5.3 での確認（2026-11-24）
+
+- `wm.ply_import`（GS を自動判別）と `wm.spz_import` で、POINTCLOUD（`radiance:sh_*` 属性付き）として入る。EEVEE / Cycles で描ける
+- **PLY は軸を変換しない**：標準的な 3DGS の PLY（Y が下向き）は横倒しで入るので X を −90° 回す。**SPZ は立った状態で入る**
+- 実測：277万粒 1.3秒／1070万粒 6.5秒／4000万粒（9.9GB）19秒・メモリ 9.7GB（ピーク 19.6GB）。EEVEE 1280×720 1枚 2〜6秒
+
 ## ライセンス
 
 MIT。表示側 Spark / three.js、書き出し側 @playcanvas/splat-transform もすべて MIT。
