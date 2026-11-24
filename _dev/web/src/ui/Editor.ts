@@ -319,9 +319,13 @@ export class Editor {
   }
   hideLasso() { this.lassoSvg.classList.add("hidden"); }
   setNumInput(text: string | null) { this.numEl.classList.toggle("hidden", !text); this.numEl.textContent = text || ""; }
+  /** Enable the selection items of an open context menu (the count can land a moment after the menu opens). */
+  setContextSelection(hasSelection: boolean) {
+    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=delete],[data-act=separate],[data-act=deselect]").forEach((b) => (b.disabled = !hasSelection));
+  }
   showContextMenu(x: number, y: number, hasSelection: boolean, hasScene: boolean) {
     this.ctx.classList.remove("hidden");
-    this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=delete],[data-act=separate],[data-act=deselect]").forEach((b) => (b.disabled = !hasSelection));
+    this.setContextSelection(hasSelection);
     this.ctx.querySelectorAll<HTMLButtonElement>("[data-act=invert],[data-act=selectAll],[data-act=setOrigin],[data-act=focus]").forEach((b) => (b.disabled = !hasScene));
     const r = this.stage.getBoundingClientRect();
     const w = this.ctx.offsetWidth, h = this.ctx.offsetHeight;

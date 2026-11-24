@@ -400,7 +400,11 @@ async function boot() {
   }, { capture: true, passive: false });
   dom.addEventListener("dblclick", (e) => { const hit = pickAt(e.clientX, e.clientY); if (hit) nav.focusOn(hit.point); });
   let ctxAt = { x: 0, y: 0 };
-  dom.addEventListener("contextmenu", (e) => { e.preventDefault(); ctxAt = { x: e.clientX, y: e.clientY }; editor.showContextMenu(e.clientX, e.clientY, selectedCount() > 0, objects.length > 0); });
+  dom.addEventListener("contextmenu", (e) => {
+    e.preventDefault(); ctxAt = { x: e.clientX, y: e.clientY };
+    editor.showContextMenu(e.clientX, e.clientY, selectedCount() > 0, objects.length > 0);
+    void settle().then(() => editor.setContextSelection(selectedCount() > 0));   // a selection may still be on its way from the workers
+  });
 
   // ── delete / restore ──
   async function deleteSelection() {
