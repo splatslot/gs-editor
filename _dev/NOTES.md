@@ -105,6 +105,12 @@ npm --prefix _dev/web run typecheck  # tsc --noEmit
 - 実測（このPC）：garden 310万粒＝読み込み＋準備 4.7秒・書き出し 20秒（226MB）・自動掃除 448粒。合成 4000万粒（9.9GB）＝読み込み＋準備 69秒。
   Blender 5.3：書き出した PLY の読み込み 0.5秒（relight_* と baked_light が FLOAT 属性で入る）、GS Relight の Set Up Relight 0.6秒（ファイルの値を使う速い経路）、Cycles 960×540・32spp 7.7秒
 
+## 原点の受け渡し（0.7.2）
+
+- 1ファイル＝1オブジェクトのときだけ、ヘッダーに `comment gs_origin x y z`。値は `frame.worldPivot()` に書き出しの軸の行列（Blender なら VIEW_TO_BLENDER）を掛けたもの。粒・法線は世界の位置のまま（互換を保つため、粒をローカル座標にはしない）
+- Blender 側は GS Relight アドオンの読み込みが、位置から原点を引いて obj.location に足す（「原点を3Dカーソルへ」と同じ）。回転・拡大は粒に焼き込み済みなので渡さない
+- 確認：garden.ksplat から分けた 30万粒に原点を置いて書き出し → gs_origin に一番近い粒まで 1mm（原点にした粒の位置は画面用の half 精度なので、その分の差）
+
 ## ライセンス
 
 MIT。表示側 Spark / three.js、書き出し側 @playcanvas/splat-transform もすべて MIT。

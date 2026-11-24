@@ -806,6 +806,12 @@ async function boot() {
     const relight = await relightFor(parts);
     // tells the GS Relight add-on how much light is already divided out of these colours
     if (relight) comments.push(`gs_relight 1 delight=${FLAT_STRENGTH}`);
+    // the object origin, in the file's axes: the splats stay where they are in the map (a plain
+    // import is unchanged) and the GS Relight add-on moves the Blender object's origin there
+    if (objs.length === 1) {
+      const p = objs[0].frame.worldPivot().applyMatrix4(toOut);
+      comments.push(`gs_origin ${[p.x, p.y, p.z].map((v) => +v.toFixed(6)).join(" ")}`);
+    }
     try {
       const sources: FileSource[] = [];
       for (const pt of parts) sources.push(await readSource(pt.o, pt.rows, pt.matrix, log));
