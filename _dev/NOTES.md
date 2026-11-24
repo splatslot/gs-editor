@@ -74,7 +74,13 @@ npm --prefix _dev/web run typecheck  # tsc --noEmit
 ## Blender 5.3 での確認（2026-11-24）
 
 - `wm.ply_import`（GS を自動判別）と `wm.spz_import` で、POINTCLOUD（`radiance:sh_*` 属性付き）として入る。EEVEE / Cycles で描ける
-- **PLY は軸を変換しない**：標準的な 3DGS の PLY（Y が下向き）は横倒しで入るので X を −90° 回す。**SPZ は立った状態で入る**
+- **PLY は軸を変換しない**：標準的な 3DGS の PLY（Y が下向き）は横倒しで入る。→ 0.6.0 で **.ply — Blender (Z up)** を追加（既定）：
+  書き出しの行列を `FILE_FLIP_INV` の代わりに `VIEW_TO_BLENDER`（three の Y-up → Blender の Z-up、X +90°）にして焼き込み、ヘッダーに
+  `comment GSEditor up +Z (Blender)` を入れる。読み込み時にこの目印があれば、メッシュの向きを `FILE_FLIP` でなく `Z_UP`（X −90°）にする
+  （`source.upZ`。Separate・Light/Full 切替・Replace でも引き継ぐ）。開き直しても同じ場所に出ることを確認済み
+- **GSEditor の SPZ は Blender 5.3 で上下逆さまに入る**（高さが Z の負の側に出る。Spark で開く分には正しい）。Blender には PLY（Blender）を使う
+- 本番データの中には最初から Z-up の PLY もある（目印なし）。GSEditor はそれを 3DGS の軸として開くので横倒しに見える → 手で回すか、
+  今後「上の軸」の切り替えを付ける
 - 実測：277万粒 1.3秒／1070万粒 6.5秒／4000万粒（9.9GB）19秒・メモリ 9.7GB（ピーク 19.6GB）。EEVEE 1280×720 1枚 2〜6秒
 
 ## ライセンス

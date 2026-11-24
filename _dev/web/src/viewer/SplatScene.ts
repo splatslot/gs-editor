@@ -16,6 +16,13 @@ const TYPE_BY_EXT: Record<string, SplatFileType> = { ply: SplatFileType.PLY, spz
 export class SplatScene {
   /** Viewer convention: file (OpenCV, Y-down) → view (Y-up) is a 180° turn about X. */
   static readonly FILE_FLIP = new THREE.Quaternion(1, 0, 0, 0);
+  /**
+   * A PLY written by GSEditor "for Blender" is already Z-up (Blender's PLY import takes the
+   * axes as they are): file (x, y, z) → view (x, z, −y), a −90° turn about X. Such files carry
+   * UP_Z_MARK as a header comment so they open upright here too.
+   */
+  static readonly Z_UP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+  static readonly UP_Z_MARK = "GSEditor up +Z (Blender)";
   private spark: SparkRenderer;
   readonly meshes: SplatMesh[] = [];
   /** First view of the first scan (shared rule with the Layouter, see startFrame.ts). */
@@ -37,14 +44,14 @@ export class SplatScene {
     return ps;
   }
 
-  /** Draw `packed` under `root`. */
-  async add(packed: PackedSplats, root: THREE.Object3D): Promise<SplatMesh> {
+  /** Draw `packed` under `root`; `orient` turns the file's axes into the view's (see FILE_FLIP / Z_UP). */
+  async add(packed: PackedSplats, root: THREE.Object3D, orient: THREE.Quaternion = SplatScene.FILE_FLIP): Promise<SplatMesh> {
     const mesh = new SplatMesh({ packedSplats: packed });
     await mesh.initialized;
     // GS files are typically OpenCV convention (Y-down); flip 180° about X to sit upright
     // in three.js Y-up. The viewer's convention, not part of the user's correction: the
     // export removes it again (see FILE_FLIP).
-    mesh.quaternion.copy(SplatScene.FILE_FLIP);
+    mesh.quaternion.copy(orient);
     root.add(mesh);
     mesh.updateMatrixWorld(true);
     this.meshes.push(mesh);

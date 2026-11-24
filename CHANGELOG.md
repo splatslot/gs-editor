@@ -1,5 +1,12 @@
 # 変更履歴
 
+## 0.6.0（2026-11-24）— Blender でそのまま立つ PLY
+
+- 書き出し形式に **.ply — Blender (Z up)** を追加し、既定にした。Blender 5.3 の PLY 読み込みは軸を変換しないので、今までの PLY は横倒しで入っていた。この形式なら GSEditor で見ていたとおりの向き・位置で入る
+- この PLY には目印（ヘッダーのコメント）が入り、GSEditor で開き直しても同じ向き・同じ場所に出る
+- 従来の PLY は **.ply — standard 3DGS** として残した（UE のプラグインや他のビューア向け）
+- 注意：GSEditor の .spz を Blender 5.3 で読むと上下が逆さまになる。Blender には .ply — Blender を使う
+
 ## 0.5.0（2026-11-24）— 手で分けて、1つずつ書き出す
 
 - **Separate（P、または右クリック → Separate Selection）**：選んだ粒を別のオブジェクトに分ける（Blender と同じ）。同じ場所・同じ原点で現れ、O で原点、F2 か Outliner のダブルクリックで名前を変えられる。Ctrl+Z で戻せる

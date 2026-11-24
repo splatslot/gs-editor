@@ -28,6 +28,7 @@
 | 複数ファイル | 何枚でも読み込める。右の Outliner で切り替え、Export で1つのファイルにまとまる |
 | Transform パネル | Blender と同じ Z-up の値。Ctrl+A（Apply Transform）で今の位置・向きを 0 にする |
 | 書き出し | Each object → own file で、分けたオブジェクトを1つずつ別ファイルに。Keep で 50% / 25% / 10% に間引ける（大きく濃い粒を残す） |
+| 形式 | 既定は **.ply — Blender (Z up)**：Blender 5.3 にそのまま立った状態で入る。UE のプラグインなどには .ply — standard 3DGS |
 | 保存されるもの | 消した粒を除き、原点・向き・大きさを焼き込んだファイル。元の精度と色（SH）はそのまま。10GB 級のファイルでも OK |
 | 大きいスキャン | 300万粒を超えると、自動で軽い表示（Light）に。選ぶ・消す・書き出しは全部の粒で行う。Info → Display: Full で全部描く |
 

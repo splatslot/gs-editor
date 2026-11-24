@@ -31,7 +31,7 @@ const VARIANT_ORDER: SelectVariant[] = ["box", "circle", "lasso"];
  * A scan in the scene. `source.rowMap` is set on a piece made by Separate: piece index → row
  * of the source file (the piece re-reads just those rows on export).
  */
-interface GsObject { id: number; name: string; source: { url: string; file?: File; name: string; rowMap?: Uint32Array }; mesh: SplatMesh; frame: SceneFrame; data: ScanData; visible: boolean }
+interface GsObject { id: number; name: string; source: { url: string; file?: File; name: string; rowMap?: Uint32Array; upZ?: boolean }; mesh: SplatMesh; frame: SceneFrame; data: ScanData; visible: boolean }
 type Active = { kind: "object"; obj: GsObject } | { kind: "volume"; vol: ClipVolume } | null;
 
 const HINTS: Record<string, string> = {
@@ -81,7 +81,7 @@ async function boot() {
     onTool: (t) => setTool(t),
     onSelectVariant: (v) => { variant = v; setTool("select"); },
     onReplaceFile: (f) => { const o = activeObj(); if (o) void replaceObject(o, URL.createObjectURL(f), f.name, f); else editor.setMessage("Make an object active first"); },
-    onExport: (fmt, what, keep) => void exportGS(fmt as GsFormat, what, keep),
+    onExport: (fmt, what, keep) => void exportGS(fmt, what, keep),
     onTheme: (t) => scene.setBackground(t === "light" ? 0xd9dad4 : 0x0e110d),
     onContext: (a) => {
       if (a === "delete") void deleteSelection();
@@ -720,7 +720,11 @@ async function boot() {
    * largest, most opaque splats stay). Each file re-reads its source — a PLY only the rows
    * it needs, slice by slice, so sources over 2 GB still export at full quality.
    */
-  async function exportGS(fmt: GsFormat, what: ExportWhat, keep: number) {
+  /** three's view (Y up) → Blender (Z up): (x, y, z) → (x, −z, y). */
+  const VIEW_TO_BLENDER = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+  async function exportGS(choice: string, what: ExportWhat, keep: number) {
+    const forBlender = choice === "plyz";
+    const fmt = (forBlender ? "ply" : choice) as GsFormat;
     const list = what === "active" ? (activeObj() ? [activeObj()!] : []) : shownObjects();
     if (!list.length) { editor.setMessage(what === "active" ? "Make an object active first" : "Nothing to export"); return; }
     const each = what === "each" && list.length > 1;
@@ -748,7 +752,7 @@ async function boot() {
         const name = g === 0 && handle?.name ? handle.name : fileName(groups[g]);
         const tag = groups.length > 1 ? ` (${g + 1}/${groups.length})` : "";
         log(`Exporting ${name}${tag}…`);
-        const { blob, lowQuality } = await bakeGroup(groups[g], fmt, keep, name, (t) => log(`${t}${tag}`));
+        const { blob, lowQuality } = await bakeGroup(groups[g], fmt, keep, name, (t) => log(`${t}${tag}`), forBlender);
         if (lowQuality) lowQ.push(name);
         const h = dir ? await dir.getFileHandle(name, { create: true }) : g === 0 ? handle : null;
         if (h) { const out = await h.createWritable(); await out.write(blob); await out.close(); } else downloadBlob(blob, name);
@@ -763,24 +767,27 @@ async function boot() {
   }
 
   /** One output file from these objects: re-read their sources and bake; if that fails, bake the viewer data. */
-  async function bakeGroup(objs: GsObject[], fmt: GsFormat, keep: number, outName: string, log: (t: string) => void): Promise<{ blob: Blob; lowQuality: boolean }> {
+  async function bakeGroup(objs: GsObject[], fmt: GsFormat, keep: number, outName: string, log: (t: string) => void, forBlender = false): Promise<{ blob: Blob; lowQuality: boolean }> {
+    // the baked matrix maps file rows → output: back to the 3DGS axes, or to Blender's Z up
+    const toOut = forBlender ? VIEW_TO_BLENDER : FILE_FLIP_INV;
+    const comments = forBlender ? [SplatScene.UP_Z_MARK] : [];
     const parts: { o: GsObject; rows: Uint32Array; matrix: THREE.Matrix4 }[] = [];
     for (const o of objs) {
       o.mesh.updateMatrixWorld(true);
       let rows = await o.data.exportRows();
       if (keep < 1) rows = o.data.thin(rows, keep);
-      parts.push({ o, rows, matrix: FILE_FLIP_INV.clone().multiply(o.mesh.matrixWorld) });
+      parts.push({ o, rows, matrix: toOut.clone().multiply(o.mesh.matrixWorld) });
     }
     try {
       const sources: FileSource[] = [];
       for (const pt of parts) sources.push(await readSource(pt.o, pt.rows, pt.matrix, log));
       log("Baking…");
-      return { blob: await bakeFiles(sources, fmt, outName, log), lowQuality: false };
+      return { blob: await bakeFiles(sources, fmt, outName, log, comments), lowQuality: false };
     } catch (e) {
       console.warn("full-quality export failed, using viewer data:", e);
       // the full splats, with any selection tint / delete marks taken off while baking
       const bake = (i: number): Promise<Blob> => i < parts.length ? parts[i].o.data.withPristine(() => bake(i + 1))
-        : bakeFromSplats(parts.map((pt) => ({ packed: pt.o.data.full as any, rows: pt.rows, matrix: pt.matrix })), fmt, outName, log);
+        : bakeFromSplats(parts.map((pt) => ({ packed: pt.o.data.full as any, rows: pt.rows, matrix: pt.matrix })), fmt, outName, log, comments);
       return { blob: await bake(0), lowQuality: true };
     }
   }
@@ -818,12 +825,28 @@ async function boot() {
   }
   const M = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}k`);
   /** Read a file, hand it to its worker, and draw it (thinned when big). */
-  async function readScan(url: string, name: string) {
+  async function readScan(url: string, name: string, file?: File) {
+    const upZ = /\.ply$/i.test(name) && await isZUp(url, file);
     const full = await splat.read(url, name);
     const data = new ScanData(full, true, lightMax);
     try { await data.init(); } catch (e) { data.dispose(); throw e; }
-    return data;
+    return { data, upZ };
   }
+  /** Does this PLY say it was written Z-up for Blender (see SplatScene.UP_Z_MARK)? Reads the header only. */
+  async function isZUp(url: string, file?: File): Promise<boolean> {
+    try {
+      let head = "";
+      if (file) head = await file.slice(0, 1 << 16).text();
+      else {
+        const rd = (await fetch(url, { headers: { Range: "bytes=0-65535" } })).body?.getReader();
+        const first = rd ? await rd.read() : null; await rd?.cancel();
+        head = first?.value ? new TextDecoder("latin1").decode(first.value) : "";
+      }
+      const end = head.indexOf("end_header");
+      return end > 0 && head.slice(0, end).includes(SplatScene.UP_Z_MARK);
+    } catch { return false; }
+  }
+  const orientOf = (src: { upZ?: boolean }) => (src.upZ ? SplatScene.Z_UP : SplatScene.FILE_FLIP);
   const loadedNote = (name: string, d: ScanData, extra = "") => d.light
     ? editor.setMessage(`Loaded ${name}${extra} — ${M(d.n)} splats: drawing the ${M(d.drawnCount)} largest so the view stays smooth. Selecting, deleting and export use every splat (Info → Display: Full draws all).`, 15000)
     : editor.setMessage(`Loaded ${name}${extra}`);
@@ -832,9 +855,10 @@ async function boot() {
     const frame = new SceneFrame(scene.scene);
     let data: ScanData | null = null;
     try {
-      data = await readScan(url, name);
-      const mesh = await splat.add(data.display, frame.root);
-      const o: GsObject = { id: nextId++, name, source: { url, file, name }, mesh, frame, data, visible: true };
+      const read = await readScan(url, name, file);
+      data = read.data;
+      const mesh = await splat.add(data.display, frame.root, orientOf(read));
+      const o: GsObject = { id: nextId++, name, source: { url, file, name, upZ: read.upZ }, mesh, frame, data, visible: true };
       objects.push(o);
       wireFrame(o);
       if (objects.length === 1) { splat.computeStart(data.display, mesh); frameStart(); setOrtho(false); scene.setViewMode("persp"); }
@@ -855,10 +879,10 @@ async function boot() {
   async function replaceObject(o: GsObject, url: string, name: string, file?: File) {
     editor.setLoading(true);
     try {
-      const data = await readScan(url, name);
-      const mesh = await splat.add(data.display, o.frame.root);
+      const { data, upZ } = await readScan(url, name, file);
+      const mesh = await splat.add(data.display, o.frame.root, orientOf({ upZ }));
       splat.remove(o.mesh); o.data.dispose();
-      o.mesh = mesh; o.data = data; o.name = name; o.source = { url, file, name };
+      o.mesh = mesh; o.data = data; o.name = name; o.source = { url, file, name, upZ };
       history.clear();
       setActive({ kind: "object", obj: o });
       scheduleClip();
@@ -885,7 +909,7 @@ async function boot() {
     try {
       const old = o.data.display;
       const packed = await o.data.setLight(!full);
-      const mesh = await splat.add(packed, o.frame.root);
+      const mesh = await splat.add(packed, o.frame.root, orientOf(o.source));
       splat.remove(o.mesh); o.data.release(old);
       o.mesh = mesh;
       editor.setMessage(full ? `Drawing all ${M(o.data.n)} splats — expect the view to be slow` : `Drawing the ${M(o.data.drawnCount)} largest of ${M(o.data.n)} splats so the view stays smooth`, 6000);
@@ -920,7 +944,7 @@ async function boot() {
         try { await data.init(); } catch (e) { data.dispose(); throw e; }
         const frame = new SceneFrame(scene.scene);
         frame.fromJSON(from.frame.toJSON());
-        const mesh = await splat.add(data.display, frame.root);
+        const mesh = await splat.add(data.display, frame.root, orientOf(from.source));
         const map = from.source.rowMap;
         const base = from.name.replace(/\.(ply|spz|splat|ksplat|sog)$/i, "").replace(/_\d{3}$/, "");
         const to: GsObject = { id: nextId++, name: `${base}_${String(partNo++).padStart(3, "0")}`, source: { ...from.source, rowMap: map ? sel.map((i) => map[i]) : sel }, mesh, frame, data, visible: true };
