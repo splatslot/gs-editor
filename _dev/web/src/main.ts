@@ -1068,9 +1068,18 @@ async function boot() {
   }
 
   setTool("select"); setActive(null);
-  const wanted = import.meta.env.DEV ? new URLSearchParams(location.search).get("gs") : null;
-  if (wanted) { for (const w of wanted.split(",")) { const startUrl = `/${w.replace(/^\/+/, "")}`; await addObject(startUrl, decodeURIComponent(startUrl.split("/").pop() || "scene")); } }
-  else editor.setMessage("Drop GS files (.ply / .spz / .splat / .ksplat) anywhere, or use ファイルを選択 on the right", 0);
+  // ?gs=<path>[,<path>…] opens scans from this site (a site that hosts the editor, e.g. Splatslot at
+  // /editor/, links its scans in). Paths on this origin only: the URL is resolved the way fetch would
+  // (which also drops tabs/newlines and reads "\" as "/") and anything that lands elsewhere is refused.
+  const wanted = new URLSearchParams(location.search).get("gs");
+  const onThisSite = (w: string) => { try { const u = new URL(`/${w.replace(/^[/\\]+/, "")}`, location.href); return u.origin === location.origin ? u : null; } catch { return null; } };
+  const nameOf = (u: URL) => { const last = u.pathname.split("/").pop() || "scene"; try { return decodeURIComponent(last); } catch { return last; } };
+  if (wanted) {
+    for (const w of wanted.split(",")) {
+      const u = onThisSite(w.trim());
+      if (u) await addObject(u.pathname + u.search, nameOf(u)); else editor.setMessage(`Not opened: ${w.trim()} is not on this site`, 0);
+    }
+  } else editor.setMessage("Drop GS files (.ply / .spz / .splat / .ksplat) anywhere, or use ファイルを選択 on the right", 0);
 
   scene.onUpdate((dt) => {
     nav.update(dt);
