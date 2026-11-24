@@ -8,6 +8,7 @@
 - **書き出しは .ply だけに**（Blender 用の Z up と、標準の軸の2種類）。中身はリライト準備済み：基本色をフラットな色に置き換え、角度で変わる色（f_rest）は捨て、`relight_nx/ny/nz`（法線）と `baked_light`（焼き付き量）を足す。ファイルは元の約3〜4割の大きさ
 - **Up axis（Info）**：ファイルの上の軸を「Y down（3DGS）」と「Z up」で切り替えられる。目印の無い PLY でも、面の向きから Z up をほぼ確実に見分けて自動で合わせる
 - Separate で分けたオブジェクトは、分ける前に全体で計算した値をそのまま引き継ぐ
+- 書き出す .ply のヘッダーに `comment gs_relight 1 delight=0.6`（割った強さ）を入れる。Blender の GS Relight アドオンがこれを読む
 
 ## 0.6.0（2026-11-24）— Blender でそのまま立つ PLY
 

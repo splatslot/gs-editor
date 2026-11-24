@@ -7,6 +7,7 @@ import { SplatScene } from "./viewer/SplatScene";
 import { NavControls, type ViewName } from "./viewer/NavControls";
 import { ViewCube } from "./viewer/ViewCube";
 import { ScanData, LIGHT_MAX, type SelectMode, type VolDesc } from "./viewer/ScanData";
+import { FLAT_STRENGTH } from "./viewer/relightPrep";
 import { SceneFrame, type FrameJSON } from "./viewer/SceneFrame";
 import { History } from "./viewer/History";
 import { HistoryPanel } from "./ui/HistoryPanel";
@@ -791,6 +792,8 @@ async function boot() {
       parts.push({ o, rows, matrix: toOut.clone().multiply(o.mesh.matrixWorld) });
     }
     const relight = await relightFor(parts);
+    // tells the GS Relight add-on how much light is already divided out of these colours
+    if (relight) comments.push(`gs_relight 1 delight=${FLAT_STRENGTH}`);
     try {
       const sources: FileSource[] = [];
       for (const pt of parts) sources.push(await readSource(pt.o, pt.rows, pt.matrix, log));
