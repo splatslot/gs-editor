@@ -1,7 +1,7 @@
 # 開発メモ（GSEditor）
 
 純静的サイト。`master` に push すると GitHub Actions（`.github/workflows/pages.yml`）がビルドして
-GitHub Pages（https://takumanakata.github.io/gs-editor/）に出す。サーバー処理は無い。
+GitHub Pages（https://splatslot.github.io/gs-editor/）に出す。サーバー処理は無い。
 
 ```
 _dev/web/     Vite + TypeScript + three.js + Spark(@sparkjsdev/spark) + @playcanvas/splat-transform

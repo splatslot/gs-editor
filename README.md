@@ -2,7 +2,7 @@
 
 **写真から作った 3D シーン（ガウシアンスプラッティング）をブラウザで開いて、ゴミを消し、原点と向きを直して、Blender でリライトできる状態にして保存するツールです。**
 
-**インストールは要りません。ブラウザで開くだけ →** https://takumanakata.github.io/gs-editor/
+**インストールは要りません。ブラウザで開くだけ →** https://splatslot.github.io/gs-editor/
 （Chrome か Edge で。ファイルはブラウザの中だけで処理され、どこにも送られません）
 
 ![GSEditor](docs/editor.png)
