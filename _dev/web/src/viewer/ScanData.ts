@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { PackedSplats } from "@sparkjsdev/spark";
 import { centreHalves, halfTable } from "./half";
 import type { VolDesc } from "./scanWorker";
+import { FLAT_STRENGTH } from "./relightPrep";
 
 /**
  * One loaded scan: the FULL splats (CPU only, never drawn when the scan is big), a
@@ -57,6 +58,11 @@ export class ScanData {
   /** About how many splats each drawn one stands for (1 = all drawn). */
   get ratio() { return this.n / this.drawnCount; }
   display!: PackedSplats;
+  /** Relight values are ready (computed at load, or handed down to a separated piece). */
+  prepared = false;
+  /** Draw the flattened colours (true) or the colours as captured. */
+  showFlat = true;
+  private flat0: Uint32Array | null = null; // drawn copy: flattened colour words
   selected = 0; hidden = 0; clipped = 0;
   ready = false;
   private orig0!: Uint32Array; // drawn copy: original colour words
@@ -123,8 +129,74 @@ export class ScanData {
     this.drawnIdx = this.light ? this.pickDrawn() : null;
     const states = await this.call<Uint8Array>("setDrawn", { idx: this.drawnIdx });
     this.build(states);
+    await this.refreshFlat();
     return this.display;
   }
+
+  // ── relight preparation ──
+  /**
+   * Floaters out, normals and baked light in (in the worker, on every splat). The cell size
+   * comes from the splats: 4 × the median largest axis of the clearly visible ones.
+   */
+  async prepare(clean: boolean) {
+    const n = this.n, enc = this.full.splatEncoding ?? {};
+    const lnMin = enc.lnScaleMin ?? -12, lnStep = ((enc.lnScaleMax ?? 9) - lnMin) / 254;
+    const sizes: number[] = [], every = Math.max(1, Math.floor(n / 200000));
+    for (let pass = 0; pass < 2 && sizes.length < 100; pass++)
+      for (let i = 0; i < n; i += every) {
+        if (pass === 0 && (this.word0(i) >>> 24) <= 127) continue;   // opacity > 0.5 first; anything if too few
+        const w3 = this.word3(i), u = Math.max(w3 & 255, (w3 >>> 8) & 255, (w3 >>> 16) & 255);
+        if (u) sizes.push(Math.exp(lnMin + (u - 1) * lnStep));
+      }
+    sizes.sort((a, b) => a - b);
+    const h = (sizes.length ? sizes[sizes.length >> 1] : 0.02) * 4;
+    const word0 = new Uint32Array(n);
+    for (let i = 0; i < n; i++) word0[i] = this.word0(i);
+    const r = await this.call<Delta & { removed: Uint32Array; counts: { far: number; faint: number; isolated: number }; votes: [number, number, number]; h: number }>(
+      "prep", { word0, h, rgbMin: enc.rgbMin ?? 0, rgbMax: enc.rgbMax ?? 1, clean }, [word0.buffer]);
+    this.apply(r);
+    this.prepared = true;
+    await this.refreshFlat();
+    return r;
+  }
+  /** Relight values (normals ×127 unsigned in file space, baked light) of the given splats. */
+  relightRows(rows: Uint32Array) { return this.call<{ nrm: Int8Array; baked: Float32Array } | null>("relightAt", { idx: rows }); }
+  /** A separated piece takes its parent's values. */
+  async adoptRelight(nrm: Int8Array, baked: Float32Array) {
+    await this.call("setRelight", { nrm, baked }, [nrm.buffer, baked.buffer]);
+    this.prepared = true;
+    await this.refreshFlat();
+  }
+  /** Work out the flattened colour of every drawn splat and repaint. */
+  async refreshFlat() {
+    if (!this.prepared) { this.flat0 = null; return; }
+    const r = await this.call<{ nrm: Int8Array; baked: Float32Array } | null>("relightAt", { idx: this.drawnIdx });
+    if (!r) return;
+    const enc = this.full.splatEncoding ?? {}, lo = enc.rgbMin ?? 0, hi = enc.rgbMax ?? 1, span = hi - lo || 1;
+    const lin = new Float32Array(256);
+    for (let b = 0; b < 256; b++) lin[b] = Math.pow(Math.min(1, Math.max(0, lo + (b / 255) * span)), 2.2);
+    const m = this.orig0.length, flat = new Uint32Array(m), inv = 1 / 2.2;
+    const enc8 = (v: number) => { const d = Math.pow(Math.min(1, v), inv); return Math.max(0, Math.min(255, Math.round(((d - lo) / span) * 255))); };
+    for (let j = 0; j < m; j++) {
+      const o = this.orig0[j], f = Math.pow(r.baked[j], -FLAT_STRENGTH);
+      flat[j] = ((o & 0xff000000) | (enc8(lin[(o >>> 16) & 255] * f) << 16) | (enc8(lin[(o >>> 8) & 255] * f) << 8) | enc8(lin[o & 255] * f)) >>> 0;
+    }
+    this.flat0 = flat;
+    this.repaintAll();
+  }
+  /** Flattened colours on / off (Space held shows the captured look). View-dependent colour goes with it. */
+  setShowFlat(on: boolean) {
+    if (this.showFlat === on) return;
+    this.showFlat = on;
+    this.repaintAll();
+  }
+  private repaintAll() {
+    const ps = this.display as any;
+    ps.setMaxSh?.(this.showFlat && this.flat0 ? 0 : 3);   // the export drops it: show what will be written
+    for (let j = 0; j < this.dst.length; j++) this.paint(j, this.dst[j]);
+    this.display.needsUpdate = true;
+  }
+  private base0(j: number) { return this.showFlat && this.flat0 ? this.flat0[j] : this.orig0[j]; }
 
   /** Which `max` splats to draw: the ones that cover the most ("area"), or every k-th ("stride"). */
   private pickDrawn(): Uint32Array {
@@ -221,6 +293,7 @@ export class ScanData {
       ps.numSplats = m;
     }
     this.display = ps;
+    this.flat0 = null;
     const words = ps.packedArray!;
     this.orig0 = new Uint32Array(m); this.orig3 = new Uint32Array(m); this.dst = new Uint8Array(m);
     for (let j = 0; j < m; j++) { this.orig0[j] = words[j * 4]; this.orig3[j] = words[j * 4 + 3]; }
@@ -236,16 +309,17 @@ export class ScanData {
     this.dst[j] = st;
     const w = this.display.packedArray!;
     w[j * 4 + 3] = st & (HIDDEN | CLIP) ? (this.orig3[j] & 0xff000000) >>> 0 : this.orig3[j];
+    const o = this.base0(j);
     if (st & SEL) {
-      const o = this.orig0[j], s = this.selByte;
+      const s = this.selByte;
       const mix = (b: number, t: number) => Math.round(b + (t - b) * SEL_MIX);
       w[j * 4] = ((o & 0xff000000) | (mix((o >>> 16) & 255, s[2]) << 16) | (mix((o >>> 8) & 255, s[1]) << 8) | mix(o & 255, s[0])) >>> 0;
-    } else w[j * 4] = this.orig0[j];
+    } else w[j * 4] = o;
   }
   private apply(r: Delta) {
     this.selected = r.sel; this.hidden = r.hidden; this.clipped = r.clipped; this.centroid = r.centroid;
     // same as paint(), inlined: this runs on the page for up to millions of drawn splats
-    const w = this.display.packedArray!, o0 = this.orig0, o3 = this.orig3, dst = this.dst, [s0, s1, s2] = this.selByte, a = SEL_MIX;
+    const w = this.display.packedArray!, o0 = this.showFlat && this.flat0 ? this.flat0 : this.orig0, o3 = this.orig3, dst = this.dst, [s0, s1, s2] = this.selByte, a = SEL_MIX;
     const d = r.d, ds = r.ds;
     for (let q = 0; q < d.length; q++) {
       const j = d[q], st = ds[q], b = j * 4;

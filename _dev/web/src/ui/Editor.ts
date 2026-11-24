@@ -19,10 +19,12 @@ export interface EditorCallbacks {
   onVolumeShow: (on: boolean) => void;
   /** Draw the active scan whole (true) or thinned (false). */
   onDisplay: (full: boolean) => void;
+  /** The active scan's file is Z up (true) or uses the usual 3DGS axes, Y down (false). */
+  onUpAxis: (z: boolean) => void;
 }
 
 /** `drawn`: splats actually drawn for this scan; `light`: thinned now (null = small enough to always draw whole). */
-export interface SceneInfo { name: string; format: string; bytes: number; total: number; visible: number; sceneTotal: number; drawn: number; light: boolean | null; sceneDrawn: number }
+export interface SceneInfo { name: string; format: string; bytes: number; total: number; visible: number; sceneTotal: number; drawn: number; light: boolean | null; sceneDrawn: number; upZ: boolean; relight: boolean }
 export interface ObjectRow { id: number; name: string; visible: boolean; active: boolean; splats: number; kind: "object" | VolumeKind }
 
 const VARIANTS: { id: SelectVariant; icon: string; label: string }[] = [
@@ -60,7 +62,7 @@ export class Editor {
   private dims: { w: HTMLElement; d: HTMLElement; h: HTMLElement; chk: HTMLInputElement };
   private volShow: HTMLInputElement;
   private dimLbls: HTMLElement[];
-  private info: { name: HTMLElement; format: HTMLElement; size: HTMLElement; splats: HTMLElement; note: HTMLElement; replace: HTMLButtonElement; dispRow: HTMLElement; disp: HTMLSelectElement };
+  private info: { name: HTMLElement; format: HTMLElement; size: HTMLElement; splats: HTMLElement; note: HTMLElement; replace: HTMLButtonElement; dispRow: HTMLElement; disp: HTMLSelectElement; up: HTMLSelectElement };
   private objList: HTMLElement;
   private fmtSel: HTMLSelectElement;
   private replacePick: HTMLInputElement;
@@ -103,6 +105,7 @@ export class Editor {
           <h3><i class="ti ti-chevron-down"></i>Info</h3>
           <div class="dbody">
             <div class="kv"><span>File</span><b id="inf-name">—</b><span>Format</span><b id="inf-format">—</b><span>Size</span><b id="inf-size">—</b><span>Splats</span><b id="inf-splats">—</b></div>
+            <div class="vp-row" title="Which way is up in the file. Most scans: Y down (3DGS). Some tools write Z up — GSEditor detects it when it can."><label>Up axis</label><select id="inf-up"><option value="y">Y down (3DGS)</option><option value="z">Z up</option></select></div>
             <div class="vp-row hidden" id="inf-disp-row" title="Big scans are drawn thinned so the view stays smooth. Selecting, deleting and export always use every splat."><label>Display</label><select id="inf-disp"><option value="light">Light</option><option value="full">Full (every splat)</option></select></div>
             <button class="sbtn wide" id="inf-replace" title="Load another file into this object, keeping its transform and origin"><i class="ti ti-replace"></i> Replace File…</button>
             <div class="note" id="inf-note">Up to ~1M splats is comfortable in the browser; 3M+ gets heavy.</div>
@@ -111,7 +114,7 @@ export class Editor {
         <section class="dsec" id="dsec-history"><h3><i class="ti ti-chevron-down"></i>History <span class="dim">クリックで戻る</span></h3><div class="dbody" id="dock-history"></div></section>
         <section class="dsec" id="dsec-export">
           <div class="exp-row"><select id="exp-what" title="Which objects go into which file"><option value="each">Each object → own file</option><option value="one">All visible → one file</option><option value="active">Active object only</option></select></div>
-          <div class="exp-row two"><select id="exp-fmt" title="Blender: Z up, opens upright in Blender 5.3. Standard 3DGS: the usual axes (UE plugins, other viewers)"><option value="plyz" selected>.ply — Blender (Z up)</option><option value="ply">.ply — standard 3DGS</option><option value="spz">.spz — small file</option><option value="splat">.splat — base color only</option></select><select id="exp-keep" title="Thin the export: keeps the splats that matter most (largest, most opaque)"><option value="1">All splats</option><option value="0.5">Keep 50%</option><option value="0.25">Keep 25%</option><option value="0.1">Keep 10%</option></select></div>
+          <div class="exp-row two"><select id="exp-fmt" title="Blender: Z up, opens upright in Blender 5.3. Standard 3DGS: the usual axes (UE plugins, other viewers)"><option value="plyz" selected>.ply — Blender (Z up)</option><option value="ply">.ply — standard 3DGS axes</option></select><select id="exp-keep" title="Thin the export: keeps the splats that matter most (largest, most opaque)"><option value="1">All splats</option><option value="0.5">Keep 50%</option><option value="0.25">Keep 25%</option><option value="0.1">Keep 10%</option></select></div>
           <button class="cta big" id="exp-go" title="Save with deletions, origins, rotations and scales baked in"><i class="ti ti-download"></i> Export</button>
         </section>
       </aside>
@@ -153,7 +156,7 @@ export class Editor {
     this.volShow.onchange = () => cb.onVolumeShow(this.volShow.checked);
     for (const id of ["dsec-dims", "dsec-info", "dsec-history"]) q(id).classList.add("closed"); // collapsed by default
     this.dimLbls = Array.from(ov.querySelectorAll(".dimlbl")) as HTMLElement[];
-    this.info = { name: q("inf-name"), format: q("inf-format"), size: q("inf-size"), splats: q("inf-splats"), note: q("inf-note"), replace: q("inf-replace"), dispRow: q("inf-disp-row"), disp: q("inf-disp") as HTMLSelectElement };
+    this.info = { name: q("inf-name"), format: q("inf-format"), size: q("inf-size"), splats: q("inf-splats"), note: q("inf-note"), replace: q("inf-replace"), dispRow: q("inf-disp-row"), disp: q("inf-disp") as HTMLSelectElement, up: q("inf-up") as HTMLSelectElement };
     this.objList = q("obj-list");
     this.selBtn = q("t-select"); this.flyout = q("flyout");
 
@@ -189,6 +192,7 @@ export class Editor {
     // replace / export / dims
     this.info.replace.onclick = () => this.replacePick.click();
     this.info.disp.onchange = () => cb.onDisplay(this.info.disp.value === "full");
+    this.info.up.onchange = () => cb.onUpAxis(this.info.up.value === "z");
     // a dropdown keeps keyboard focus after a pick, which mutes the shortcuts (X, Ctrl+Z …) until the next click
     for (const sel of Array.from(ui.querySelectorAll("select"))) sel.addEventListener("change", () => (sel as HTMLSelectElement).blur());
     this.replacePick.onchange = () => { const f = this.replacePick.files?.[0]; if (f) cb.onReplaceFile(f); this.replacePick.value = ""; };
@@ -264,16 +268,18 @@ export class Editor {
     this.info.size.textContent = i.bytes ? `${(i.bytes / 1048576).toFixed(1)} MB` : "—";
     this.info.splats.textContent = i.visible === i.total ? i.total.toLocaleString() : `${i.visible.toLocaleString()} / ${i.total.toLocaleString()}`;
     const M = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}k`);
+    this.info.up.value = i.upZ ? "z" : "y";
     this.info.dispRow.classList.toggle("hidden", i.light === null);
     if (i.light !== null) {
       this.info.disp.value = i.light ? "light" : "full";
       (this.info.disp.options[0] as HTMLOptionElement).text = i.light ? `Light (${M(i.drawn)} drawn)` : "Light";
     }
     const d = i.sceneDrawn;
-    this.info.note.textContent = i.light ? `Drawing ${M(i.drawn)} of ${M(i.total)} splats so the view stays smooth. Selecting, deleting and export use every splat.`
+    const flatNote = i.relight ? "Colours are flattened (the shoot's light divided out) and ready for relighting — hold Space to see them as captured. " : "";
+    this.info.note.textContent = flatNote + (i.light ? `Drawing ${M(i.drawn)} of ${M(i.total)} splats so the view stays smooth. Selecting, deleting and export use every splat.`
       : d > 3_000_000 ? `Drawing ${M(d)} splats: heavy in the browser — expect lag.`
       : d > 1_000_000 ? `Drawing ${M(d)} splats: workable.`
-      : "Up to ~1M drawn splats is comfortable in the browser; 3M+ gets heavy. Big scans are drawn thinned automatically.";
+      : "Up to ~1M drawn splats is comfortable in the browser; 3M+ gets heavy. Big scans are drawn thinned automatically.");
   }
   setObjects(rows: ObjectRow[]) {
     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");

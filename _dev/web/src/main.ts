@@ -16,7 +16,7 @@ import { IntakePanel } from "./ui/IntakePanel";
 import { TransformPanel } from "./ui/TransformPanel";
 import { VolumePanel, type ClipVolume, type VolumeKind } from "./ui/VolumePanel";
 import { AXIS_TO_THREE, toBlender } from "./ui/blenderAxes";
-import { bakeFiles, bakeFromSplats, downloadBlob, type FileSource, type GsFormat } from "./export/exportGS";
+import { bakeFiles, bakeFromSplats, downloadBlob, type FileSource, type GsFormat, type RelightRows } from "./export/exportGS";
 import { plyLayout, plyRows } from "./export/plyRows";
 import type { SplatMesh } from "@sparkjsdev/spark";
 
@@ -35,9 +35,9 @@ interface GsObject { id: number; name: string; source: { url: string; file?: Fil
 type Active = { kind: "object"; obj: GsObject } | { kind: "volume"; vol: ClipVolume } | null;
 
 const HINTS: Record<string, string> = {
-  box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   Wheel: zoom   X: delete   P: separate   W: next select tool   RMB: menu",
-  circle: "LMB drag: paint select (Shift add, Ctrl subtract)   Shift+Wheel or [ ]: radius   MMB: orbit   X: delete   W: next select tool",
-  lasso: "LMB drag: lasso select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   X: delete   W: next select tool",
+  box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   Wheel: zoom   X: delete   P: separate   W: next select tool   Space: captured look   RMB: menu",
+  circle: "LMB drag: paint select (Shift add, Ctrl subtract)   Shift+Wheel or [ ]: radius   MMB: orbit   X: delete   W: next select tool   Space: captured look",
+  lasso: "LMB drag: lasso select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   X: delete   W: next select tool   Space: captured look",
   move: "Drag the handles   X / Y / Z: lock an axis   Type a number, Enter   Ctrl: snap   Alt+G: clear   Esc: back to select",
   rotate: "Drag a ring (rotates about the object origin)   X / Y / Z: lock an axis   Type degrees, Enter   Ctrl: 5° steps   Alt+R: clear",
   scale: "Drag a handle (scales about the object origin)   Type a factor, Enter   Ctrl: snap   Alt+S: clear",
@@ -103,6 +103,7 @@ async function boot() {
     onDimsVisible: () => { dimsBox.visible = editor.dimsVisible && !!lastBox; },
     onVolumeShow: (on) => { const v = activeVol(); if (v) { v.showBounds = on; volumeChanged(v, true); } },
     onDisplay: (full) => { const o = activeObj(); if (o) void setDisplay(o, full); },
+    onUpAxis: (z) => { const o = activeObj(); if (o) setUpAxis(o, z); },
   }, stage, ui);
   const intake = new IntakePanel(editor.mounts.intake, (url, file) => void addObject(url, file.name, file), (t) => editor.setMessage(t));
   stage.addEventListener("dragover", (e) => e.preventDefault());
@@ -622,7 +623,7 @@ async function boot() {
     const d = o.data, drawn = d.drawnCount;
     editor.setInfo({ name: o.source.name, format: (o.source.name.split(".").pop() || "").toLowerCase(), bytes: o.source.rowMap ? 0 : o.source.file?.size ?? 0, total: d.n, visible: d.n - d.hidden,
       sceneTotal: objects.reduce((a, x) => a + x.data.n, 0), sceneDrawn: shownObjects().reduce((a, x) => a + x.data.drawnCount, 0),
-      drawn, light: d.n > lightMax ? d.light : null });
+      drawn, light: d.n > lightMax ? d.light : null, upZ: !!o.source.upZ, relight: d.prepared });
   };
   const refreshOutliner = () => {
     const rows: ObjectRow[] = [
@@ -646,8 +647,19 @@ async function boot() {
 
   // ── keyboard ──
   const isTyping = (e: Event) => { const t = e.target as HTMLElement | null; return !!t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable); };
+  // flattened colours are the normal view; holding Space shows the scans as captured
+  let flatView = true;
+  const setFlatAll = (on: boolean) => {
+    if (flatView === on) return;
+    flatView = on;
+    for (const o of objects) o.data.setShowFlat(on);
+    if (on) editor.setMessage("", 1); else editor.setMessage("Captured look — release Space for the flattened colours", 0);
+  };
+  window.addEventListener("keyup", (e) => { if (e.code === "Space") setFlatAll(true); });
+  window.addEventListener("blur", () => setFlatAll(true));
   window.addEventListener("keydown", (e) => {
     if (isTyping(e)) return;
+    if (e.code === "Space") { e.preventDefault(); if (!e.repeat) setFlatAll(false); return; }
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.code === "KeyZ") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if (ctrl && e.code === "KeyY") { e.preventDefault(); redo(); return; }
@@ -778,18 +790,49 @@ async function boot() {
       if (keep < 1) rows = o.data.thin(rows, keep);
       parts.push({ o, rows, matrix: toOut.clone().multiply(o.mesh.matrixWorld) });
     }
+    const relight = await relightFor(parts);
     try {
       const sources: FileSource[] = [];
       for (const pt of parts) sources.push(await readSource(pt.o, pt.rows, pt.matrix, log));
       log("Baking…");
-      return { blob: await bakeFiles(sources, fmt, outName, log, comments), lowQuality: false };
+      return { blob: await bakeFiles(sources, fmt, outName, log, comments, relight), lowQuality: false };
     } catch (e) {
       console.warn("full-quality export failed, using viewer data:", e);
       // the full splats, with any selection tint / delete marks taken off while baking
       const bake = (i: number): Promise<Blob> => i < parts.length ? parts[i].o.data.withPristine(() => bake(i + 1))
-        : bakeFromSplats(parts.map((pt) => ({ packed: pt.o.data.full as any, rows: pt.rows, matrix: pt.matrix })), fmt, outName, log, comments);
+        : bakeFromSplats(parts.map((pt) => ({ packed: pt.o.data.full as any, rows: pt.rows, matrix: pt.matrix })), fmt, outName, log, comments, relight);
       return { blob: await bake(0), lowQuality: true };
     }
+  }
+
+  /**
+   * Normals and baked light for the exported rows, in the same order. A normal is turned the way
+   * the positions are (into the output axes) and made to face up in the view; where none could be
+   * worked out (too few splats around) it is "up". Null when a scan was not prepared.
+   */
+  async function relightFor(parts: { o: GsObject; rows: Uint32Array; matrix: THREE.Matrix4 }[]): Promise<RelightRows | null> {
+    const got: { nrm: Int8Array; baked: Float32Array }[] = [];
+    for (const pt of parts) { const r = pt.o.data.prepared ? await pt.o.data.relightRows(pt.rows) : null; if (!r) return null; got.push(r); }
+    const total = parts.reduce((a, pt) => a + pt.rows.length, 0);
+    const normals = new Float32Array(total * 3), baked = new Float32Array(total);
+    const p = new THREE.Vector3(), s = new THREE.Vector3(), q = new THREE.Quaternion();
+    let off = 0;
+    parts.forEach((pt, k) => {
+      const r = got[k];
+      pt.matrix.decompose(p, q, s); const mo = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(q)).elements;
+      pt.o.mesh.matrixWorld.decompose(p, q, s); const mv = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(q)).elements;
+      const ux = mv[1], uy = mv[4], uz = mv[7];   // the view's up, in file axes
+      for (let i = 0; i < pt.rows.length; i++) {
+        let x = r.nrm[i * 3], y = r.nrm[i * 3 + 1], z = r.nrm[i * 3 + 2];
+        const L = Math.hypot(x, y, z);
+        if (L < 64) { x = ux; y = uy; z = uz; } else { x /= L; y /= L; z /= L; if (mv[1] * x + mv[4] * y + mv[7] * z < 0) { x = -x; y = -y; z = -z; } }
+        const j = (off + i) * 3;
+        normals[j] = mo[0] * x + mo[3] * y + mo[6] * z; normals[j + 1] = mo[1] * x + mo[4] * y + mo[7] * z; normals[j + 2] = mo[2] * x + mo[5] * y + mo[8] * z;
+        baked[off + i] = r.baked[i];
+      }
+      off += pt.rows.length;
+    });
+    return { normals, baked };
   }
 
   /**
@@ -830,7 +873,33 @@ async function boot() {
     const full = await splat.read(url, name);
     const data = new ScanData(full, true, lightMax);
     try { await data.init(); } catch (e) { data.dispose(); throw e; }
-    return { data, upZ };
+    // floaters out, normals and baked light in — on the whole scan, before any cut
+    editor.setMessage(`Preparing ${name}: removing floaters, working out normals and the baked light…`, 0);
+    let prep: Awaited<ReturnType<ScanData["prepare"]>> | null = null;
+    try { prep = await data.prepare(true); } catch (e) { console.warn("relight preparation failed:", e); }
+    data.setShowFlat(flatView);
+    // a PLY without the mark: trust the surfaces — most of a site (ground, roofs) faces up, so when
+    // nearly all flat surfaces face along Z, the file is Z up. Other formats have fixed axes, and a
+    // single object (no ground) is left alone unless the evidence is overwhelming.
+    const v = prep?.votes ?? [0, 0, 0];
+    const detected = !upZ && /\.ply$/i.test(name) && v[2] > 3 * Math.max(v[0], v[1]);
+    return { data, upZ: upZ || detected, detected, prep };
+  }
+  /** The floater cleanup as the scan's first history step (Ctrl+Z brings them back). */
+  const recordCleanup = (o: GsObject, prep: Awaited<ReturnType<ScanData["prepare"]>> | null) => {
+    const removed = prep?.removed;
+    if (!removed?.length) return "";
+    history.push({ label: `自動掃除 (${removed.length.toLocaleString()} 粒)`, undo: () => { void o.data.restore(removed).then(afterEdit); }, redo: () => { void o.data.hide(removed).then(afterEdit); } });
+    const c = prep!.counts;
+    return ` — removed ${removed.length.toLocaleString()} floaters (${c.far.toLocaleString()} far, ${c.faint.toLocaleString()} faint, ${c.isolated.toLocaleString()} isolated; Ctrl+Z brings them back)`;
+  };
+  /** Up axis of one scan's file (Info → Up axis): turn its mesh; the transform and origin stay. */
+  function setUpAxis(o: GsObject, z: boolean) {
+    if (!!o.source.upZ === z) return;
+    o.source.upZ = z;
+    o.mesh.quaternion.copy(orientOf(o.source)); o.mesh.updateMatrixWorld(true);
+    scheduleClip(); scheduleDims(); updateInfo(); frameAll();
+    editor.setMessage(z ? "Up axis: Z — the file is read as Z up" : "Up axis: Y down — the usual 3DGS axes");
   }
   /** Does this PLY say it was written Z-up for Blender (see SplatScene.UP_Z_MARK)? Reads the header only. */
   async function isZUp(url: string, file?: File): Promise<boolean> {
@@ -847,9 +916,9 @@ async function boot() {
     } catch { return false; }
   }
   const orientOf = (src: { upZ?: boolean }) => (src.upZ ? SplatScene.Z_UP : SplatScene.FILE_FLIP);
-  const loadedNote = (name: string, d: ScanData, extra = "") => d.light
-    ? editor.setMessage(`Loaded ${name}${extra} — ${M(d.n)} splats: drawing the ${M(d.drawnCount)} largest so the view stays smooth. Selecting, deleting and export use every splat (Info → Display: Full draws all).`, 15000)
-    : editor.setMessage(`Loaded ${name}${extra}`);
+  const loadedNote = (name: string, d: ScanData, extra = "") => editor.setMessage(`Loaded ${name}${extra}`
+    + (d.prepared ? " — colours flattened for relighting (hold Space for the captured look)" : "")
+    + (d.light ? ` — ${M(d.n)} splats: drawing the ${M(d.drawnCount)} largest so the view stays smooth (Info → Display)` : ""), 20000);
   async function addObject(url: string, name: string, file?: File) {
     editor.setLoading(true);
     const frame = new SceneFrame(scene.scene);
@@ -857,6 +926,7 @@ async function boot() {
     try {
       const read = await readScan(url, name, file);
       data = read.data;
+      const upNote = read.detected ? " — up axis detected: Z up (Info → Up axis)" : "";
       const mesh = await splat.add(data.display, frame.root, orientOf(read));
       const o: GsObject = { id: nextId++, name, source: { url, file, name, upZ: read.upZ }, mesh, frame, data, visible: true };
       objects.push(o);
@@ -865,7 +935,7 @@ async function boot() {
       setActive({ kind: "object", obj: o });
       setTool("select");
       scheduleClip();
-      loadedNote(name, data);
+      loadedNote(name, data, recordCleanup(o, read.prep) + upNote);
     } catch (e) {
       data?.dispose();
       scene.scene.remove(frame.root);
@@ -879,14 +949,14 @@ async function boot() {
   async function replaceObject(o: GsObject, url: string, name: string, file?: File) {
     editor.setLoading(true);
     try {
-      const { data, upZ } = await readScan(url, name, file);
+      const { data, upZ, prep, detected } = await readScan(url, name, file);
       const mesh = await splat.add(data.display, o.frame.root, orientOf({ upZ }));
       splat.remove(o.mesh); o.data.dispose();
       o.mesh = mesh; o.data = data; o.name = name; o.source = { url, file, name, upZ };
       history.clear();
       setActive({ kind: "object", obj: o });
       scheduleClip();
-      loadedNote(name, data, " — transform and origin kept");
+      loadedNote(name, data, " — transform and origin kept" + recordCleanup(o, prep) + (detected ? " — up axis detected: Z up" : ""));
     } catch (e) {
       console.warn("GS load failed:", e);
       editor.setMessage(`Could not load ${name}`, 0);
@@ -942,6 +1012,9 @@ async function boot() {
         const sel = await from.data.selectedIndices();
         const data = new ScanData(from.data.extract(sel), true, lightMax);
         try { await data.init(); } catch (e) { data.dispose(); throw e; }
+        const rl = from.data.prepared ? await from.data.relightRows(sel) : null;   // computed on the whole scan, before this cut
+        if (rl) await data.adoptRelight(rl.nrm, rl.baked);
+        data.setShowFlat(flatView);
         const frame = new SceneFrame(scene.scene);
         frame.fromJSON(from.frame.toJSON());
         const mesh = await splat.add(data.display, frame.root, orientOf(from.source));

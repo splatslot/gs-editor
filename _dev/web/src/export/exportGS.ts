@@ -35,6 +35,40 @@ export interface RefPoint { index: number; x: number; y: number; z: number; }
 export class AlignmentError extends Error {}
 
 const SH_C0 = 0.28209479177387814;
+
+/**
+ * Per-row relight data for the rows of the final (baked, combined) table, in order:
+ * unit normals in the OUTPUT axes (xyz per row) and the baked light.
+ */
+export interface RelightRows { normals: Float32Array; baked: Float32Array }
+/** Same strength the viewer uses (relightPrep.FLAT_STRENGTH); the Blender add-on expects 0.6. */
+const FLAT_STRENGTH = 0.6;
+
+/**
+ * Relight-ready layout (what the GS Relight Blender add-on reads): the base colour (f_dc) becomes
+ * the flattened colour — display = 0.5 + C0·f_dc, linear = display^2.2, flat = linear / baked^0.6,
+ * back through ^(1/2.2) — view-dependent colour (f_rest_*) and nx/ny/nz are dropped (Blender's PLY
+ * import ignores nx/ny/nz), and relight_nx/ny/nz + baked_light are added.
+ */
+function toRelight(st: ST, table: InstanceType<ST["DataTable"]>, rl: RelightRows) {
+  const n = table.numRows;
+  if (rl.baked.length !== n || rl.normals.length !== n * 3) throw new Error(`relight rows ${rl.baked.length} ≠ table rows ${n}`);
+  for (let k = 0; k < 3; k++) {
+    const col = table.getColumnByName(`f_dc_${k}`); if (!col) throw new Error("f_dc がありません");
+    const d = col.data as Float32Array;
+    for (let i = 0; i < n; i++) {
+      const disp = Math.min(1, Math.max(0, 0.5 + SH_C0 * d[i]));
+      const flat = Math.min(1, Math.pow(disp, 2.2) / Math.pow(rl.baked[i], FLAT_STRENGTH));
+      d[i] = (Math.pow(flat, 1 / 2.2) - 0.5) / SH_C0;
+    }
+  }
+  for (const name of [...table.columnNames]) if (/^f_rest_\d+$/.test(name) || name === "nx" || name === "ny" || name === "nz") table.removeColumn(name);
+  const nx = new Float32Array(n), ny = new Float32Array(n), nz = new Float32Array(n);
+  for (let i = 0; i < n; i++) { nx[i] = rl.normals[i * 3]; ny[i] = rl.normals[i * 3 + 1]; nz[i] = rl.normals[i * 3 + 2]; }
+  table.addColumn(new st.Column("relight_nx", nx)); table.addColumn(new st.Column("relight_ny", ny)); table.addColumn(new st.Column("relight_nz", nz));
+  table.addColumn(new st.Column("baked_light", Float32Array.from(rl.baked)));
+  return table;
+}
 /** Reader options (only the LCC reader looks at these; defaults mirror the CLI). */
 const READ_OPTIONS = { iterations: 10, lodSelect: [], unbundled: false, lodChunkCount: 512, lodChunkExtent: 16 };
 
@@ -178,7 +212,7 @@ export async function bakeFile(data: Uint8Array, filename: string, parts: BakePa
 
 /** One source file per object, each with its own baked transform; all combined into one output. */
 export interface FileSource { data: Uint8Array; filename: string; parts: BakePart[]; refs: RefPoint[] }
-export async function bakeFiles(sources: FileSource[], fmt: GsFormat, outName: string, log: (s: string) => void = () => {}, comments: string[] = []): Promise<Blob> {
+export async function bakeFiles(sources: FileSource[], fmt: GsFormat, outName: string, log: (s: string) => void = () => {}, comments: string[] = [], relight: RelightRows | null = null): Promise<Blob> {
   const { st, pc } = await loadLibs();
   const baked: InstanceType<ST["DataTable"]>[] = [];
   for (const src of sources) {
@@ -193,7 +227,8 @@ export async function bakeFiles(sources: FileSource[], fmt: GsFormat, outName: s
     baked.push(await applyParts(st, pc, table, src.parts, Bin, sparkBasis(fmt), log));
   }
   if (!baked.length) throw new Error("書き出す splat がありません");
-  const table = baked.length === 1 ? baked[0] : st.combine(baked);
+  let table = baked.length === 1 ? baked[0] : st.combine(baked);
+  if (relight && fmt === "ply") table = toRelight(st, table, relight);
   return new Blob([await writeTable(st, table, fmt, outName, comments) as BlobPart], { type: MIME });
 }
 
@@ -205,7 +240,7 @@ export interface SplatSource {
 }
 
 /** Fallback path: build the table from the viewer's in-memory splats (base colour only). */
-export async function bakeFromSplats(sources: SplatSource[], fmt: GsFormat, outName: string, log: (s: string) => void = () => {}, comments: string[] = []): Promise<Blob> {
+export async function bakeFromSplats(sources: SplatSource[], fmt: GsFormat, outName: string, log: (s: string) => void = () => {}, comments: string[] = [], relight: RelightRows | null = null): Promise<Blob> {
   const { st, pc } = await loadLibs();
   const names = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"];
   const parts: BakePart[] = [];
@@ -231,7 +266,8 @@ export async function bakeFromSplats(sources: SplatSource[], fmt: GsFormat, outN
   const baked: InstanceType<ST["DataTable"]>[] = [];
   // the table IS the viewer's frame here (built from Spark's data), so the input basis is identity
   for (let i = 0; i < tables.length; i++) baked.push(await applyParts(st, pc, tables[i], [parts[i]], new THREE.Matrix4(), sparkBasis(fmt), log));
-  const table = baked.length === 1 ? baked[0] : st.combine(baked);
+  let table = baked.length === 1 ? baked[0] : st.combine(baked);
+  if (relight && fmt === "ply") table = toRelight(st, table, relight);
   return new Blob([await writeTable(st, table, fmt, outName, comments) as BlobPart], { type: MIME });
 }
 

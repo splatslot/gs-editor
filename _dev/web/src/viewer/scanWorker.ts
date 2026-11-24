@@ -11,6 +11,7 @@
  * await the last.
  */
 import { halfTable } from "./half";
+import { prepareRelight } from "./relightPrep";
 
 const HIDDEN = 1, CLIP = 2, SEL = 4;
 const OFF = -32768; // projection sentinel: behind the camera, off far out, or not shown
@@ -25,6 +26,8 @@ const H = halfTable();
 let selCount = 0, hidCount = 0, clipCount = 0;
 let sumX = 0, sumY = 0, sumZ = 0; // centroid of the selection (file space)
 let mark: Uint8Array;    // drawn indices touched by the current op
+let rN: Int8Array | null = null;     // relight: unsigned normal per splat ×127 (file space)
+let rB: Float32Array | null = null;  // relight: baked light per splat
 let touched: number[] = [];
 
 type Shape =
@@ -163,7 +166,7 @@ function hideIdx(idx: Uint32Array | number[], on: boolean) {
 const ops: Record<string, (a: any) => { value: any; transfer?: Transferable[] } | any> = {
   init(a: { halves: Uint16Array; n: number; idx: Uint32Array | null }) {
     c = a.halves; n = a.n; st = new Uint8Array(n);
-    selCount = hidCount = clipCount = 0; sumX = sumY = sumZ = 0; sx = sy = null;
+    selCount = hidCount = clipCount = 0; sumX = sumY = sumZ = 0; sx = sy = null; rN = rB = null;
     setDrawn(a.idx);
     return true;
   },
@@ -209,6 +212,26 @@ const ops: Record<string, (a: any) => { value: any; transfer?: Transferable[] } 
     const res = out.slice(0, o);
     return { value: res, transfer: [res.buffer] };
   },
+  /**
+   * Relight preparation on the whole scan (see relightPrep.ts): floaters are deleted like any
+   * delete (the reply's `removed` is the undo batch), normals and baked light are kept here.
+   */
+  prep(a: { word0: Uint32Array; h: number; rgbMin: number; rgbMax: number; clean: boolean }) {
+    const r = prepareRelight({ n, halves: c, H, word0: a.word0, rgbMin: a.rgbMin, rgbMax: a.rgbMax, h: a.h, state: st, clean: a.clean });
+    rN = r.nrm; rB = r.baked;
+    hideIdx(r.removed, true);
+    const d = delta(r.removed.length);
+    return { value: { ...d.value, removed: r.removed, counts: r.counts, votes: r.votes, h: r.h }, transfer: [...d.transfer, r.removed.buffer] };
+  },
+  /** Normals (×127, unsigned, file space) and baked light of the given splats — all when idx is null. */
+  relightAt(a: { idx: Uint32Array | null }) {
+    if (!rN || !rB) return null;
+    const m = a.idx ? a.idx.length : n, nrm = new Int8Array(m * 3), baked = new Float32Array(m);
+    for (let q = 0; q < m; q++) { const i = a.idx ? a.idx[q] : q; nrm[q * 3] = rN[i * 3]; nrm[q * 3 + 1] = rN[i * 3 + 1]; nrm[q * 3 + 2] = rN[i * 3 + 2]; baked[q] = rB[i]; }
+    return { value: { nrm, baked }, transfer: [nrm.buffer, baked.buffer] };
+  },
+  /** A separated piece takes its parent's values (computed on the whole scan, before the cut). */
+  setRelight(a: { nrm: Int8Array; baked: Float32Array }) { rN = a.nrm; rB = a.baked; return true; },
   /** The selected splats, ascending (for Separate). */
   selectedIdx() {
     const out = new Uint32Array(selCount); let q = 0;
