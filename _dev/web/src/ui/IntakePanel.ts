@@ -27,7 +27,8 @@ export class IntakePanel {
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
     drop.addEventListener("drop", (e) => {
-      e.preventDefault(); drop.classList.remove("over");
+      // stop here: the viewer-wide drop handler around this box would read the same files a second time
+      e.preventDefault(); e.stopPropagation(); drop.classList.remove("over");
       const files = Array.from(e.dataTransfer?.files ?? []);
       if (files.length) this.handleFiles(files);
     });
