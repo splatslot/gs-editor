@@ -82,6 +82,7 @@ export class Editor {
           <p>GS ファイル（.ply / .spz / .splat / .ksplat）を画面にドロップ。浮いたゴミは自動で消える（<kbd>Ctrl+Z</kbd> で戻る）</p>
           <h4>見る</h4>
           <dl><dt><kbd>中ドラッグ</kbd></dt><dd>回す</dd><dt><kbd>Shift</kbd> + <kbd>中ドラッグ</kbd></dt><dd>平行移動</dd><dt><kbd>ホイール</kbd></dt><dd>前後</dd>
+          <dt>マウスが無いとき</dt><dd><kbd>Alt</kbd> + <kbd>左ドラッグ</kbd> 回す、<kbd>Alt</kbd> + <kbd>Shift</kbd> で平行移動、<kbd>Alt</kbd> + <kbd>Ctrl</kbd>（Mac は <kbd>Option</kbd> + <kbd>Command</kbd>）で前後</dd>
           <dt>右上のキューブ</dt><dd>真上・正面・横から</dd><dt><kbd>ダブルクリック</kbd></dt><dd>そこへ寄る</dd><dt><kbd>Space</kbd> 押している間</dt><dd>撮影時の見た目（影あり）</dd></dl>
           <h4>選んで消す</h4>
           <dl><dt><kbd>左ドラッグ</kbd></dt><dd>範囲で選ぶ（<kbd>W</kbd> で 箱 → 丸 → 投げ縄）</dd><dt><kbd>Shift</kbd> / <kbd>Ctrl</kbd></dt><dd>足す / 減らす</dd>

@@ -36,9 +36,9 @@ interface GsObject { id: number; name: string; source: { url: string; file?: Fil
 type Active = { kind: "object"; obj: GsObject } | { kind: "volume"; vol: ClipVolume } | null;
 
 const HINTS: Record<string, string> = {
-  box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   Wheel: zoom   X: delete   P: separate   W: next select tool   Space: captured look   RMB: menu",
-  circle: "LMB drag: paint select (Shift add, Ctrl subtract)   Shift+Wheel or [ ]: radius   MMB: orbit   X: delete   W: next select tool   Space: captured look",
-  lasso: "LMB drag: lasso select (Shift add, Ctrl subtract)   MMB: orbit   Shift+MMB: pan   X: delete   W: next select tool   Space: captured look",
+  box: "LMB drag: box select (Shift add, Ctrl subtract)   MMB or Alt+LMB: orbit   Shift+MMB or Alt+Shift+LMB: pan   Wheel: zoom   X: delete   P: separate   W: next select tool   Space: captured look   RMB: menu",
+  circle: "LMB drag: paint select (Shift add, Ctrl subtract)   Shift+Wheel or [ ]: radius   MMB or Alt+LMB: orbit   X: delete   W: next select tool   Space: captured look",
+  lasso: "LMB drag: lasso select (Shift add, Ctrl subtract)   MMB or Alt+LMB: orbit   Shift+MMB or Alt+Shift+LMB: pan   X: delete   W: next select tool   Space: captured look",
   move: "Drag the handles   X / Y / Z: lock an axis   Type a number, Enter   Ctrl: snap   Alt+G: clear   Esc: back to select",
   rotate: "Drag a ring (rotates about the object origin)   X / Y / Z: lock an axis   Type degrees, Enter   Ctrl: 5° steps   Alt+R: clear",
   scale: "Drag a handle (scales about the object origin)   Type a factor, Enter   Ctrl: snap   Alt+S: clear",
@@ -135,6 +135,8 @@ async function boot() {
   const tcRay = (gizmo as any).getRaycaster ? (gizmo as any).getRaycaster() : (gizmo as any)._raycaster;
   if (tcRay?.layers) tcRay.layers.enable(1);
   gizmo.size = 0.9;
+  // Alt+left is a view drag (no middle button): the gizmo stands aside until the release
+  nav.onAltNav = (on) => { gizmo.enabled = !on; };
   gizmo.detach();
   const proxy = new THREE.Object3D(); proxy.name = "gizmoProxy"; scene.scene.add(proxy);
   let drag: { state: FrameJSON | null; vol: { center: THREE.Vector3; size: THREE.Vector3; radius: number } | null; lastP: THREE.Vector3; lastQ: THREE.Quaternion; lastS: THREE.Vector3 } | null = null;
@@ -350,7 +352,7 @@ async function boot() {
   };
   dom.addEventListener("pointerdown", (e) => {
     editor.hideContextMenu();
-    if (e.button !== 0 || nav.isBlocked() || (!objects.length && !volumes.length)) return;
+    if (e.button !== 0 || nav.isBlocked() || nav.isAltNav() || (!objects.length && !volumes.length)) return;
     if (GIZMO_TOOLS.includes(tool)) { if ((gizmo as any).axis == null) clickDown = { x: e.clientX, y: e.clientY }; return; }
     try { dom.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
     if (volumeAt(e.clientX, e.clientY)) outlineDown = { x: e.clientX, y: e.clientY, mode: modeOf(e) };
@@ -415,7 +417,9 @@ async function boot() {
   dom.addEventListener("dblclick", (e) => { const hit = pickAt(e.clientX, e.clientY); if (hit) nav.focusOn(hit.point); });
   let ctxAt = { x: 0, y: 0 };
   dom.addEventListener("contextmenu", (e) => {
-    e.preventDefault(); ctxAt = { x: e.clientX, y: e.clientY };
+    e.preventDefault();
+    if (nav.isAltNav() || e.altKey) return;   // a Mac's Ctrl+click during an Alt view drag, not a menu
+    ctxAt = { x: e.clientX, y: e.clientY };
     editor.showContextMenu(e.clientX, e.clientY, selectedCount() > 0, objects.length > 0);
     void settle().then(() => editor.setContextSelection(selectedCount() > 0));   // a selection may still be on its way from the workers
   });

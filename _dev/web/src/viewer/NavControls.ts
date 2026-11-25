@@ -11,7 +11,9 @@ export type ViewName = "front" | "back" | "right" | "left" | "top" | "bottom";
  *   wheel              dolly
  *   numpad 1 / 3 / 7   front / right / top  (Ctrl = the opposite side), 5 = ortho toggle
  *   Home               frame the scene
- * The left button is never used here: it belongs to the tools (selection, gizmo).
+ * Without a middle button (laptops) Alt+left stands in for it, as Blender's "emulate 3 button
+ * mouse": Alt+left orbit, Alt+Shift+left pan, Alt+Ctrl (or Alt+Cmd) + left dolly.
+ * Otherwise the left button is never used here: it belongs to the tools (selection, gizmo).
  * On load the camera gently sways around the start pose until first use.
  */
 export class NavControls {
@@ -30,6 +32,9 @@ export class NavControls {
   onRotateStart: (() => void) | null = null;
   /** Called on every orbit change (the view cube follows). */
   onChange: (() => void) | null = null;
+  /** Called when an Alt+left view drag starts (true) and ends (false): the tools stand aside meanwhile. */
+  onAltNav: ((on: boolean) => void) | null = null;
+  private altNav = false;
 
   constructor(private camera: THREE.PerspectiveCamera, private dom: HTMLElement) {
     this.orbit = new OrbitControls(camera, dom);
@@ -49,16 +54,37 @@ export class NavControls {
     // Blender's modifier scheme on the MIDDLE button. OrbitControls reads
     // mouseButtons.MIDDLE at pointerdown, so set it just before it looks.
     dom.addEventListener("pointerdown", (e) => {
-      if (e.button !== 1) return;
+      const emulated = e.button === 0 && e.altKey && e.pointerType !== "touch" && !this.blocked;
+      if (e.button !== 1 && !emulated) return;
       // OrbitControls itself turns Shift+ROTATE into a pan (and Shift+PAN back into a
-      // rotate!), so the only remap needed is Ctrl → dolly
-      this.orbit.mouseButtons.MIDDLE = e.ctrlKey ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE;
-      if (!e.shiftKey && !e.ctrlKey) {
+      // rotate!), so the only remap needed is Ctrl → dolly (and Cmd too for Alt+left: on a Mac
+      // Ctrl+click is the right click)
+      const dolly = e.ctrlKey || (emulated && e.metaKey);
+      const how = dolly ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE;
+      if (emulated) {
+        // decided here for the whole drag: letting Alt go early keeps it a view drag
+        this.orbit.mouseButtons.LEFT = how;
+        this.altNav = true; this.onAltNav?.(true);
+      } else this.orbit.mouseButtons.MIDDLE = how;
+      if (!e.shiftKey && !dolly) {
         const p = this.pivotProvider?.(e.clientX, e.clientY);
         if (p) this.setPivot(p);
         this.onRotateStart?.();
       }
     }, { capture: true });
+    const endAlt = () => {
+      if (!this.altNav) return;
+      this.orbit.mouseButtons.LEFT = -1 as unknown as THREE.MOUSE;
+      this.altNav = false; this.onAltNav?.(false);
+    };
+    // after OrbitControls has seen the release (it listens on the canvas; this is on window, bubbling)
+    window.addEventListener("pointerup", endAlt);
+    window.addEventListener("pointercancel", endAlt);
+    window.addEventListener("blur", endAlt);
+    // Windows browsers move the focus to their menu when Alt is pressed and let go on its own;
+    // after an Alt+drag that would swallow the next keys
+    window.addEventListener("keydown", (e) => { if (e.key === "Alt") e.preventDefault(); });
+    window.addEventListener("keyup", (e) => { if (e.key === "Alt") e.preventDefault(); });
     dom.addEventListener("contextmenu", (e) => e.preventDefault());
     window.addEventListener("wheel", () => this.touch(), { passive: true });
   }
@@ -69,6 +95,8 @@ export class NavControls {
   setGizmoDragging(b: boolean) { this.blocked = b; this.orbit.enabled = !b; }
   setOrbitEnabled(b: boolean) { this.orbit.enabled = b && !this.blocked; }
   isBlocked() { return this.blocked; }
+  /** True from an Alt+left press until its release: a view drag, not a tool click. */
+  isAltNav() { return this.altNav; }
 
   /**
    * Re-pivot the orbit onto `p` WITHOUT a view jump: keep the look direction and put
